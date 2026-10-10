@@ -424,6 +424,8 @@ async function main() {
     groupEvents:     { welcomeMessage: "", leaveMessage: "" },
     backupIntervalMinutes: 60,
     cronJobs: [],
+    watchers: [],
+    watcherIntervalSec: 4,
     commandRoles: {},
     userAgent: "Mozilla/5.0 (Linux; Android 12; M2102J20SG) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.0.0 Mobile Safari/537.36",
   };
@@ -493,6 +495,10 @@ async function main() {
   });
 
   await startBot();
+
+  // ── مراقبة المحادثات المحددة (تعمل حتى بدون إشعارات) ───────────────────
+  if (!Array.isArray(global.config.watchers)) global.config.watchers = [];
+  require("./utils/chatWatcher").start();
 }
 
 main().catch(e => {
