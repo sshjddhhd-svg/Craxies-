@@ -1,3 +1,4 @@
+"use strict";
 /**
  * chatWatcher.js — مراقبة المحادثات، والرد فقط على طلب صريح.
  *
@@ -206,11 +207,14 @@ async function checkThread(tid) {
     if (hist) {
       const r = lastFromHistory(hist, me);
       if (r.last) last = r.last;
-      // رسالة وصلت بالمستمع ولم تظهر بعد في السجل؟ اعتمد عليها
-      if (s.evt && !r.mids.has(s.evt.mid) && s.evt.at >= fetchStart - EVENT_TRUST_MS) {
+      if (s.evt && r.mids.has(s.evt.mid)) s.evt = null;
+      // فضّل أحدث حدث موثوق من المستمع على سجل قديم لم يصل إليه بعد.
+      const recentEvent = s.last?.mid && s.last.at >= fetchStart - EVENT_TRUST_MS && !r.mids.has(s.last.mid)
+        ? s.last : null;
+      if (recentEvent) {
+        last = recentEvent;
+      } else if (s.evt && !r.mids.has(s.evt.mid) && s.evt.at >= fetchStart - EVENT_TRUST_MS && !r.last?.mine) {
         last = { mid: s.evt.mid, sender: "event", mine: false };
-      } else if (s.evt && r.mids.has(s.evt.mid)) {
-        s.evt = null;
       }
     } else if (s.evt && (!s.last || s.last.mid !== s.evt.mid)) {
       // فشلت القراءة: استخدم آخر رسالة وصلت بالمستمع
@@ -268,12 +272,13 @@ function onEvent(_api, event) {
     if (!sender) return;
     const s = S(tid);
     if (sender === myID(a)) {
-      s.last = { mid: String(event.messageID || ""), sender, mine: true };
+      s.last = { mid: String(event.messageID || ""), sender, mine: true, at: Date.now() };
       return;
     }
     const mid = String(event.messageID || `evt-${Date.now()}`);
-    s.evt = { mid, at: Date.now() };
-    s.last = { mid, sender, mine: false };
+    const at = Date.now();
+    s.evt = { mid, at };
+    s.last = { mid, sender, mine: false, at };
 
     // النشاط العادي يُسجّل للمراقبة فقط؛ يلزم منشن أو أمر واضح لبدء رد.
     if (!isExplicitTrigger(event, a) || s.pendingReplyAt) return;
