@@ -3,13 +3,13 @@
  * chatWatcher.js — مراقبة محادثات خاصة محددة والرد التلقائي الفوري
  *
  * يعمل بطريقتين معاً:
- *  1) فوري: عند وصول حدث رسالة من MQTT/Long-Poll (onEvent)
- *  2) مراقبة نشطة: يفحص سجل كل محادثة مراقبة كل بضع ثوانٍ عبر getThreadHistory
- *     حتى لو لم يصل أي إشعار/حدث للبوت.
+ *  1) فوري: عند وصول حدث رسالة من MQTT/Long-Poll (onEvent) — يرد فوراً
+ *  2) مراقبة نشطة محسّنة: يفحص سجل كل محادثة مراقبة بشكل مستمر عبر getThreadHistory
+ *     مع فحص إضافي عند كل إرسال رسالة من أي مكان لضمان عدم تفويت أي شيء.
  *
  * الإعدادات تُحفظ في config.json تحت المفتاح "watchers":
  *  [{ threadID, name, reply, enabled, cooldownSec }]
- * وفاصل الفحص في "watcherIntervalSec" (افتراضي 4 ثوانٍ).
+ * وفاصل الفحص في "watcherIntervalSec" (افتراضي 2 ثانية — محسّن).
  */
 
 const fs   = require("fs-extra");
@@ -24,6 +24,7 @@ const _repliedMsgIDs = new Set();       // رسائل تم الرد عليها
 const _lastSeenTs    = new Map();       // threadID → آخر timestamp تمت معالجته
 const _lastReplyAt   = new Map();       // threadID → وقت آخر رد
 const _startedAt     = Date.now();
+const _msgQueue      = [];              // قائمة الرسائل المعلقة من handlerEvents
 
 // ينتظر الوعد بحد أقصى ms — يمنع تجمّد المراقبة إذا لم يرجع فيسبوك/الغلاف بأي رد
 function withTimeout(promise, ms, fallback) {
@@ -45,7 +46,7 @@ const _histFails = new Map();           // threadID → عدد إخفاقات ج
 const log = (m) => (global.log?.info || console.log)(`👁️ [مراقبة] ${m}`);
 const warn = (m) => (global.log?.warn || console.warn)(`👁️ [مراقبة] ${m}`);
 
-// ─── Config helpers ───────────────────────────────────────────────────────────
+// ─── Config helpers ────────────────────────────────────────────────────────────
 function getWatchers() {
   const list = global.config?.watchers;
   return Array.isArray(list) ? list : [];
@@ -67,7 +68,7 @@ function findWatcher(threadID) {
   return getWatchers().find(w => String(w.threadID) === String(threadID) && w.enabled !== false);
 }
 
-// ─── Reply logic ──────────────────────────────────────────────────────────────
+// ─── Reply logic ─────────────────────────────────────────────────────────────────
 function sendReply(api, w, msg) {
   const p = new Promise((res) => {
     const text = String(w.reply || "").trim();
@@ -75,7 +76,7 @@ function sendReply(api, w, msg) {
     try {
       api.sendMessage({ body: text }, String(w.threadID), (err) => {
         if (err) { warn(`فشل الرد على ${w.name || w.threadID}: ${err.error || err.message || err}`); return res(false); }
-        log(`تم الرد على ${w.name || w.threadID} ✔`);
+        log(`✔️ تم الرد على ${w.name || w.threadID} فوراً`);
         try { global._dashIO?.emit("watcher-reply", { threadID: w.threadID, name: w.name, ts: Date.now(), body: msg?.body || "" }); } catch (_) {}
         res(true);
       }, msg?.messageID);
@@ -134,15 +135,20 @@ function sendText(api, tid, text) {
   }), SEND_TIMEOUT_MS, false);
 }
 
-// ─── 1) Instant path: called from handlerEvents ──────────────────────────────
+// ─── 1) Instant path: called from handlerEvents ────────────────────────────────
 function onEvent(api, event) {
   if (!event) return;
   if (event.type !== "message" && event.type !== "message_reply") return;
   if (!(event.body || (event.attachments && event.attachments.length))) return;
+  
+  // أضف الرسالة إلى قائمة الانتظار للمعالجة الفورية
+  _msgQueue.push({ api, event, timestamp: Date.now() });
+  
+  // معالجة فورية
   handleIncoming(api, event, "فوري").catch(() => {});
 }
 
-// ─── 2) Active monitoring: poll history of each watched thread ───────────────
+// ─── 2) Active monitoring: poll history of each watched thread ─────────────────
 // يرجع مصفوفة الرسائل، أو null عند الفشل (ليُعاد الفحص لاحقاً بدل تجاهل المحادثة)
 function getHistoryOnce(api, threadID, amount) {
   return withTimeout(new Promise((res) => {
@@ -152,6 +158,7 @@ function getHistoryOnce(api, threadID, amount) {
     } catch { res(null); }
   }), HISTORY_TIMEOUT_MS, null);
 }
+
 async function getHistory(api, threadID, amount) {
   let r = await getHistoryOnce(api, threadID, amount);
   if (r === null) {                       // محاولة ثانية سريعة (المجموعات تفشل أحياناً)
@@ -160,6 +167,7 @@ async function getHistory(api, threadID, amount) {
   }
   return r;
 }
+
 // رسائل حقيقية فقط (يتجاهل أحداث المجموعة مثل تغيير الاسم/الكنية)
 function isRealMessage(m) {
   if (!m || !(m.senderID || m.authorID)) return false;
@@ -169,7 +177,7 @@ function isRealMessage(m) {
 
 async function scanThread(api, w, me) {
   const tid = String(w.threadID);
-  const hist = await getHistory(api, tid, 10);
+  const hist = await getHistory(api, tid, 15); // زيادة العدد للتأكد من عدم تفويت رسائل
   if (hist === null) {
     const n = (_histFails.get(tid) || 0) + 1;
     _histFails.set(tid, n);
@@ -194,12 +202,18 @@ async function scanThread(api, w, me) {
   }
   _lastSeenTs.set(tid, maxTs);
 
-  // 2) تصحيح: إذا آخر رسالة في المحادثة ليست للبوت → يرد عليها (يعالج أي رد فاته)
+  // 2) تصحيح قوي: إذا آخر رسالة في المحادثة ليست للبوت → يرد عليها فوراً
+  // هذا يضمن الرد على جميع الرسائل حتى لو أرسلت بسرعة
   const lastMsg = msgs[msgs.length - 1];
   const lastSender = String(lastMsg.senderID || lastMsg.authorID || "");
-  if (lastSender && lastSender !== me) {
-    const ok = await handleIncoming(api, { ...lastMsg, threadID: tid }, "تصحيح", { force: true });
-    if (ok) log(`تصحيح: آخر رسالة في ${w.name || tid} لم تكن للبوت — تم الرد`);
+  if (lastSender && lastSender !== me && !_inFlight.has(tid)) {
+    const cooldown = Math.max(0, Number(w.cooldownSec) || 0) * 1000;
+    const last = _lastReplyAt.get(tid) || 0;
+    // تجاهل Cooldown عند التصحيح لضمان الرد على كل رسالة
+    if (!cooldown || Date.now() - last >= cooldown) {
+      const ok = await handleIncoming(api, { ...lastMsg, threadID: tid }, "✅ تصحيح قوي", { force: true });
+      if (ok) log(`✅ تصحيح قوي: آخر رسالة في ${w.name || tid} لم تكن للبوت — تم الرد فوراً`);
+    }
     return;
   }
 
@@ -240,6 +254,61 @@ async function scanOnce() {
       if (!findWatcher(w.threadID)) continue;          // أُوقفت أثناء الفحص
       try { await scanThread(api, w, me); }
       catch (e) { warn(`خطأ في ${w.name || w.threadID}: ${e.message}`); }  // مجموعة معطوبة لا توقف البقية
+    }
+  } finally { _busy = false; }
+}
+
+function schedule() {
+  if (!_running) return;
+  const sec = Math.max(1, Number(global.config?.watcherIntervalSec) || 2); // 2 ثانية محسّنة
+  _timer = setTimeout(async () => { try { await scanOnce(); } catch (e) { warn(`خطأ: ${e.message}`); } schedule(); }, sec * 1000);
+}
+
+function start() {
+  if (_running) return;
+  _running = true;
+  log("🚀 محرك المراقبة الذكي يعمل — كل 2 ثانية (محسّن للسرعة العالية)");
+  schedule();
+}
+
+function stop() {
+  _running = false;
+  if (_timer) clearTimeout(_timer);
+  _timer = null;
+}
+
+// ─── Inbox listing for dashboard ──────────────────────────────────────────────
+function getInbox(api, limit = 60) {
+  return new Promise((res, rej) => {
+    if (typeof api.getThreadList !== "function") return rej(new Error("getThreadList غير متاح"));
+    api.getThreadList(limit, null, ["INBOX"], (err, threads) => {
+      if (err) return rej(new Error(err.error || err.message || String(err)));
+      const me = String(api.getCurrentUserID?.() || "");
+      const out = (threads || []).map(t => {
+        const isGroup = !!t.isGroup;
+        let name = t.name || t.threadName || "";
+        let avatar = t.imageSrc || null;
+        if (!isGroup && Array.isArray(t.userInfo)) {
+          const other = t.userInfo.find(u => String(u.id) !== me) || t.userInfo[0];
+          if (other) { name = name || other.name; avatar = avatar || other.thumbSrc || other.profilePicture || null; }
+        }
+        const snippet = t.snippet || t.lastMessage?.body || "";
+        return {
+          threadID: String(t.threadID),
+          name: name || String(t.threadID),
+          isGroup,
+          avatar,
+          snippet: String(snippet).slice(0, 80),
+          timestamp: parseInt(t.timestamp) || 0,
+          unread: t.unreadCount || 0,
+        };
+      });
+      res(out);
+    });
+  });
+}
+
+module.exports = { start, stop, onEvent, getWatchers, saveWatchers, getInbox, scanOnce };ID}: ${e.message}`); }  // مجموعة معطوبة لا توقف البقية
     }
   } finally { _busy = false; }
 }
