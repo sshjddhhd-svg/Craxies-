@@ -1,25 +1,13 @@
 "use strict";
 /**
- * chatWatcher.js — مراقبة الغروبات: البوت يبقى دائماً صاحب آخر رسالة.
+ * chatWatcher.js — مراقبة المحادثات، والرد فقط على طلب صريح.
  *
- * الطريقة (بسيطة ومباشرة كما طلبت):
- *  - كل 4 ثوانٍ يقرأ البوت سجل كل غروب مُراقَب من فيسبوك نفسه.
- *  - إن كانت آخر رسالة في الغروب للبوت → لا يفعل شيئاً.
- *  - إن كانت آخر رسالة لشخص آخر → يرسل الرد فوراً.
- *  - بالإضافة لذلك: أي رسالة جديدة تصل عبر المستمع تُطلق فحصاً فورياً،
- *    فلا ينتظر البوت الـ 4 ثوانٍ.
- *
- * لماذا لن يتجاهل الرسائل السريعة بعد الآن:
- *  - لا مقارنة بين ساعة السيرفر وساعة فيسبوك (كانت سبب تجاهل الرسائل).
- *    القرار يعتمد فقط على: "مَن صاحب آخر رسالة؟" ومعرّف الرسالة.
- *  - إن وصلت رسائل أثناء الإرسال، يُعاد الفحص مباشرة بعد انتهاء الإرسال.
- *
- * لماذا لن يتوقف:
- *  - مهلة لكل قراءة وإرسال، وكل غروب مستقل عن الآخر.
- *  - لا يتخلى عن أي غروب أبداً؛ عند الفشل يعيد المحاولة (أقصى انتظار 8 ثوانٍ).
- *  - إن فشلت قراءة السجل يعتمد على آخر رسالة وصلت عبر المستمع.
- *  - مراقب (watchdog) يعيد تشغيل الحلقة إن توقفت ويحرّر أي غروب عالق.
- *  - يستخدم دائماً global.api الحالي (يعمل بعد إعادة تسجيل الدخول).
+ * - يفحص سجل المحادثات المفعّلة دورياً، لكنه لا يرسل لمجرد وجود نشاط.
+ * - يبدأ الرد فقط عند منشن البوت أو الأمر /ردالمراقبة.
+ * - يحجز مؤقتاً واحداً عشوائياً (20–30 ثانية)؛ الرسائل اللاحقة لا تعيد ضبطه.
+ * - عند انتهاء المهلة يعيد فحص آخر رسالة: إن كانت للبوت يلغي، وإلا يرسل رد المراقبة مرة واحدة.
+ * - يحتفظ بنص الرد الثابت لكل محادثة، ويطبق حداً أدنى 60 ثانية بين الردود.
+ * - لكل غروب مهلات وإعادة محاولة مستقلة، ويستخدم global.api الحالي بعد إعادة الدخول.
  */
 
 const fs   = require("fs-extra");
@@ -32,22 +20,19 @@ const HISTORY_AMOUNT       = 8;
 const HISTORY_TIMEOUT_MS   = 12000;
 const SEND_TIMEOUT_MS      = 25000;
 const BUSY_STUCK_MS        = 60000;
-const MIN_GAP_MS           = 1500;   // أقل فاصل بين ردّين في نفس الغروب (حماية من حظر فيسبوك)
-const RESEND_AFTER_MS      = 15000;  // إن لم يظهر ردّنا في السجل بعد هذه المدة نرسل مرة أخرى
 const MAX_BACKOFF_MS       = 8000; 
-const EVENT_TRUST_MS       = 20000;  // رسالة وصلت بالمستمع ولم تظهر بعد في السجل
+const EVENT_TRUST_MS       = 40000;  // يغطي مهلة الرد 20–30 ثانية وتأخر تحديث السجل
 
 const log  = (m) => { try { (global.log?.info || console.log)(`👁️ [مراقبة] ${m}`); } catch (_) {} };
 const warn = (m) => { try { (global.log?.warn || console.warn)(`👁️ [مراقبة] ${m}`); } catch (_) {} };
 
 /**
- * لكل غروب:
- *  last       : آخر رسالة معروفة { mid, sender, mine }
- *  evt        : آخر رسالة وصلت عبر المستمع من شخص آخر { mid, at }
- *  repliedTo  : معرّف الرسالة التي رددنا بعدها آخر مرة
- *  repliedAt  : وقت آخر رد ناجح (ساعة السيرفر — للفواصل فقط)
- *  busy/busySince/again : منع التداخل + إعادة الفحص إن وصلت رسائل أثناء العمل
- *  fails/nextTryAt      : إعادة المحاولة عند الفشل
+ * لكل محادثة:
+ *  last/evt              : آخر رسالة معروفة ومعلومة المستمع الفوري
+ *  repliedAt             : وقت آخر رد ناجح لفرض التبريد
+ *  pendingReplyAt        : موعد الرد الوحيد بعد منشن أو أمر صريح
+ *  busy/busySince/again  : منع التداخل وإعادة الفحص بعد اكتمال العمل
+ *  fails/nextTryAt       : إعادة المحاولة عند فشل الإرسال
  */
 const _state = new Map();
 let _timer = null, _watchdog = null, _running = false, _lastTick = 0;
@@ -56,8 +41,8 @@ function S(tid) {
   tid = String(tid);
   let s = _state.get(tid);
   if (!s) {
-    s = { last: null, evt: null, repliedTo: null, repliedAt: 0, busy: false, busySince: 0,
-          again: false, fails: 0, nextTryAt: 0, kickTimer: null };
+    s = { last: null, evt: null, repliedAt: 0, busy: false, busySince: 0,
+          again: false, fails: 0, nextTryAt: 0, pendingReplyAt: 0, kickTimer: null };
     _state.set(tid, s);
   }
   return s;
@@ -115,6 +100,21 @@ function findWatcher(threadID) {
 
 function tsOf(m) { return parseInt(m?.timestamp) || 0; }
 function senderOf(m) { return String(m?.senderID || m?.authorID || m?.author || ""); }
+
+function isExplicitTrigger(event, a) {
+  const id = myID(a);
+  const mentions = event?.mentions;
+  const mentioned = Boolean(id && mentions && typeof mentions === "object" && (
+    Array.isArray(mentions)
+      ? mentions.some(m => String(typeof m === "string" ? m : (m?.id || m?.userID || m?.uid || "")) === id)
+      : mentions instanceof Map
+        ? mentions.has(id)
+        : Object.prototype.hasOwnProperty.call(mentions, id)
+  ));
+  const body = String(event?.body || "").trim();
+  const command = `${String(global.commandPrefix || "/")}ردالمراقبة`;
+  return mentioned || body === command || body.startsWith(`${command} `);
+}
 
 /* ───────────── قراءة السجل ───────────── */
 
@@ -207,11 +207,14 @@ async function checkThread(tid) {
     if (hist) {
       const r = lastFromHistory(hist, me);
       if (r.last) last = r.last;
-      // رسالة وصلت بالمستمع ولم تظهر بعد في السجل؟ اعتمد عليها
-      if (s.evt && !r.mids.has(s.evt.mid) && s.evt.at >= fetchStart - EVENT_TRUST_MS) {
+      if (s.evt && r.mids.has(s.evt.mid)) s.evt = null;
+      // فضّل أحدث حدث موثوق من المستمع على سجل قديم لم يصل إليه بعد.
+      const recentEvent = s.last?.mid && s.last.at >= fetchStart - EVENT_TRUST_MS && !r.mids.has(s.last.mid)
+        ? s.last : null;
+      if (recentEvent) {
+        last = recentEvent;
+      } else if (s.evt && !r.mids.has(s.evt.mid) && s.evt.at >= fetchStart - EVENT_TRUST_MS && !r.last?.mine) {
         last = { mid: s.evt.mid, sender: "event", mine: false };
-      } else if (s.evt && r.mids.has(s.evt.mid)) {
-        s.evt = null;
       }
     } else if (s.evt && (!s.last || s.last.mid !== s.evt.mid)) {
       // فشلت القراءة: استخدم آخر رسالة وصلت بالمستمع
@@ -220,22 +223,25 @@ async function checkThread(tid) {
     if (!last) return;
     s.last = last;
 
-    // 2) آخر رسالة للبوت → لا شيء
-    if (last.mine) { s.fails = 0; return; }
+    // 2) إذا أصبحت آخر رسالة للبوت، ألغِ الطلب المعلّق.
+    if (last.mine) {
+      s.fails = 0;
+      s.pendingReplyAt = 0;
+      return;
+    }
 
-    // 3) آخر رسالة لشخص آخر → أرسل
+    // 3) لا رد دون منشن/أمر صريح وجدولة واحدة نشطة.
+    if (!s.pendingReplyAt) return;
     const now = Date.now();
-    // رددنا للتو على نفس الرسالة والسجل لم يتحدث بعد؟ انتظر قليلاً قبل الإعادة
-    if (s.repliedTo && s.repliedTo === last.mid && now - s.repliedAt < RESEND_AFTER_MS) return;
-
-    const cooldown = Math.max(0, Number(w.cooldownSec) || 0) * 1000;
-    const readyAt = Math.max(s.nextTryAt, s.repliedAt + Math.max(cooldown, MIN_GAP_MS));
+    const cooldown = Math.max(60, Number(w.cooldownSec) || 0) * 1000;
+    const readyAt = Math.max(s.pendingReplyAt, s.nextTryAt, s.repliedAt + cooldown);
     if (now < readyAt) { retryIn = readyAt - now + 50; return; }
 
     const sent = await sendReply(a, w, last.mid || undefined);
     if (sent) {
+      s.pendingReplyAt = 0;
       s.fails = 0; s.nextTryAt = 0;
-      s.repliedTo = last.mid; s.repliedAt = Date.now();
+      s.repliedAt = Date.now();
       s.last = { mid: sent.mid || `sent-${Date.now()}`, sender: me, mine: true };
       if (s.evt && s.evt.mid === last.mid) s.evt = null;
     } else {
@@ -266,13 +272,26 @@ function onEvent(_api, event) {
     if (!sender) return;
     const s = S(tid);
     if (sender === myID(a)) {
-      s.last = { mid: String(event.messageID || ""), sender, mine: true };
+      s.last = { mid: String(event.messageID || ""), sender, mine: true, at: Date.now() };
       return;
     }
     const mid = String(event.messageID || `evt-${Date.now()}`);
-    s.evt = { mid, at: Date.now() };
-    s.last = { mid, sender, mine: false };
-    kick(tid, 250); // تأخير بسيط لدمج الرسائل المتتالية السريعة في رد واحد
+    const at = Date.now();
+    s.evt = { mid, at };
+    s.last = { mid, sender, mine: false, at };
+
+    // النشاط العادي يُسجّل للمراقبة فقط؛ يلزم منشن أو أمر واضح لبدء رد.
+    if (!isExplicitTrigger(event, a) || s.pendingReplyAt) return;
+    const w = findWatcher(tid);
+    if (!w) return;
+    const now = Date.now();
+    const cooldown = Math.max(60, Number(w.cooldownSec) || 0) * 1000;
+    if (now < s.repliedAt + cooldown) return;
+
+    // وقت صحيح عشوائياً بين 20 و30 ثانية، ويُحسب مرة واحدة لكل طلب.
+    const delay = (20 + Math.floor(Math.random() * 11)) * 1000;
+    s.pendingReplyAt = now + delay;
+    kick(tid, delay);
   } catch (e) { warn(`خطأ في المستمع: ${e.message}`); }
 }
 
@@ -317,7 +336,7 @@ function start() {
   if (_running) return;
   _running = true;
   _lastTick = Date.now();
-  log(`🚀 المراقبة تعمل — فحص كل ${intervalMs() / 1000} ثوانٍ، البوت سيبقى صاحب آخر رسالة`);
+  log(`🚀 المراقبة تعمل — فحص كل ${intervalMs() / 1000} ثوانٍ؛ الرد فقط عند منشن أو /ردالمراقبة`);
   loop();
   _watchdog = setInterval(() => { try { watchdog(); } catch (e) { warn(e.message); } }, 5000);
   scanOnce();

@@ -614,14 +614,14 @@ async function startDashboard(port) {
   });
 
   app.post("/api/watchers", (req, res) => {
-    const { threadID, name, reply, cooldownSec = 0, enabled = true } = req.body || {};
+    const { threadID, name, reply, cooldownSec = 60, enabled = true } = req.body || {};
     if (!threadID) return res.status(400).json({ error: "اختر محادثة" });
     if (!reply || !String(reply).trim()) return res.status(400).json({ error: "اكتب نص الرد" });
     const list = watcher.getWatchers().slice();
     const i = list.findIndex(w => String(w.threadID) === String(threadID));
     const item = {
       threadID: String(threadID), name: name || String(threadID), reply: String(reply),
-      cooldownSec: Math.max(0, parseInt(cooldownSec) || 0), enabled: !!enabled,
+      cooldownSec: Math.max(60, parseInt(cooldownSec) || 0), enabled: !!enabled,
       addedAt: i >= 0 ? list[i].addedAt : Date.now(),
     };
     if (i >= 0) list[i] = item; else list.push(item);
