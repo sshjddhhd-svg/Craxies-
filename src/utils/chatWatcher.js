@@ -204,12 +204,20 @@ async function scanThread(api, w, me) {
   }
 
   // 3) آخر رسالة للبوت: بعد مدة خمول يرسل 🤣🤣
-  const idleMs   = Math.max(60, Number(w.idleSec ?? global.config?.watcherIdleSec) || 900) * 1000;
-  const idleText = String(w.idleText ?? global.config?.watcherIdleText ?? "🤣🤣");
+  const idleMs   = 15 * 60 * 1000;          // 15 دقيقة بالضبط
+  const idleText = String(w.idleText ?? global.config?.watcherIdleText ?? "هروب 🤣🤣");
   const lastTs = parseInt(lastMsg.timestamp) || 0;
   if (idleText && lastTs && Date.now() - lastTs >= idleMs && _idleSentFor.get(tid) !== lastTs) {
     _idleSentFor.set(tid, lastTs);
     if (await sendText(api, tid, idleText)) {
+      setTimeout(async () => {
+        try {
+          const h2 = (await getHistory(api, tid, 20)) || hist;
+          const all = h2.filter(isRealMessage).sort((x, y) => (parseInt(x.timestamp) || 0) - (parseInt(y.timestamp) || 0));
+          const f = await require("./chatSnapshot").capture(api, tid, w.name, all, me);
+          if (f) log(`📸 حُفظت لقطة للمحادثة ${w.name || tid}`);
+        } catch (e) { warn(`فشل التقاط الصورة: ${e.message}`); }
+      }, 3000);
       log(`مرت ${Math.round(idleMs / 60000)} دقيقة على آخر رسالة للبوت في ${w.name || tid} — أُرسل ${idleText}`);
     } else _idleSentFor.delete(tid);
   }
