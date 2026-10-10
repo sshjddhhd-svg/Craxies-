@@ -64,34 +64,51 @@ function sendReply(api, w, msg) {
   });
 }
 
-async function handleIncoming(api, msg, source) {
-  if (!api || !msg) return;
-  const tid = String(msg.threadID || "");
-  const w = findWatcher(tid);
-  if (!w) return;
+const _inFlight   = new Set();          // threadID → رد قيد الإرسال
+const _idleSentFor = new Map();         // threadID → timestamp آخر رسالة للبوت أُرسل بعدها 🤣
 
-  const me = String(api.getCurrentUserID?.() || "");
-  const sender = String(msg.senderID || msg.authorID || "");
-  if (!sender || sender === me) return;              // تجاهل رسائلي
-  const mid = msg.messageID;
-  if (mid && _repliedMsgIDs.has(mid)) return;        // تم الرد مسبقاً
-  const ts = parseInt(msg.timestamp) || Date.now();
-  if (ts < _startedAt - 1000) return;                // تجاهل الرسائل القديمة قبل التشغيل
-  if (ts < (w.addedAt || 0)) return;                 // تجاهل ما قبل إضافة المراقبة
-
-  if (mid) _repliedMsgIDs.add(mid);
+function rememberReplied(mid) {
+  if (!mid) return;
+  _repliedMsgIDs.add(mid);
   if (_repliedMsgIDs.size > 5000) {
     const arr = [..._repliedMsgIDs]; _repliedMsgIDs.clear();
     arr.slice(-2500).forEach(x => _repliedMsgIDs.add(x));
   }
+}
+
+async function handleIncoming(api, msg, source, opts = {}) {
+  if (!api || !msg) return false;
+  const tid = String(msg.threadID || "");
+  const w = findWatcher(tid);
+  if (!w) return false;
+
+  const me = String(api.getCurrentUserID?.() || "");
+  const sender = String(msg.senderID || msg.authorID || "");
+  if (!sender || sender === me) return false;        // تجاهل رسائلي
+  const mid = msg.messageID;
+  if (mid && _repliedMsgIDs.has(mid)) return false;  // تم الرد مسبقاً
+  const ts = parseInt(msg.timestamp) || Date.now();
+  if (!opts.force && ts < _startedAt - 1000) return false; // القديمة (إلا في التصحيح)
+  if (ts < (w.addedAt || 0)) return false;           // ما قبل إضافة المراقبة
+  if (_inFlight.has(tid)) return false;
 
   const cooldown = Math.max(0, Number(w.cooldownSec) || 0) * 1000;
   const last = _lastReplyAt.get(tid) || 0;
-  if (cooldown && Date.now() - last < cooldown) return;
-  _lastReplyAt.set(tid, Date.now());
+  if (cooldown && Date.now() - last < cooldown) return false; // سيُعاد في الفحص القادم
 
-  log(`رسالة جديدة في ${w.name || tid} (${source}) — جارٍ الرد…`);
-  await sendReply(api, w, msg);
+  _inFlight.add(tid);
+  try {
+    log(`رسالة جديدة في ${w.name || tid} (${source}) — جارٍ الرد…`);
+    const ok = await sendReply(api, w, msg);
+    if (ok) { rememberReplied(mid); _lastReplyAt.set(tid, Date.now()); }
+    return ok;                                       // عند الفشل يُصحَّح في الفحص التالي
+  } finally { _inFlight.delete(tid); }
+}
+
+function sendText(api, tid, text) {
+  return new Promise((res) => {
+    api.sendMessage({ body: text }, String(tid), (err) => res(!err));
+  });
 }
 
 // ─── 1) Instant path: called from handlerEvents ──────────────────────────────
@@ -117,10 +134,16 @@ async function scanOnce() {
   const list = getWatchers().filter(w => w.enabled !== false);
   if (!list.length) return;
   _busy = true;
+  const me = String(api.getCurrentUserID?.() || "");
   try {
     for (const w of list) {
       const tid = String(w.threadID);
-      const msgs = await getHistory(api, tid, 5);
+      const msgs = (await getHistory(api, tid, 10))
+        .filter(m => m && (m.senderID || m.authorID))
+        .sort((x, y) => (parseInt(x.timestamp) || 0) - (parseInt(y.timestamp) || 0));
+      if (!msgs.length) continue;
+
+      // 1) الرد على الرسائل الجديدة منذ آخر فحص
       const since = Math.max(_lastSeenTs.get(tid) || 0, _startedAt, w.addedAt || 0);
       let maxTs = since;
       for (const m of msgs) {
@@ -130,6 +153,26 @@ async function scanOnce() {
         await handleIncoming(api, { ...m, threadID: tid }, "مراقبة");
       }
       _lastSeenTs.set(tid, maxTs);
+
+      // 2) تصحيح: إذا آخر رسالة في المحادثة ليست للبوت → يرد مباشرة
+      const lastMsg = msgs[msgs.length - 1];
+      const lastSender = String(lastMsg.senderID || lastMsg.authorID || "");
+      if (lastSender && lastSender !== me) {
+        const ok = await handleIncoming(api, { ...lastMsg, threadID: tid }, "تصحيح", { force: true });
+        if (ok) log(`تصحيح: آخر رسالة في ${w.name || tid} لم تكن للبوت — تم الرد`);
+        continue;
+      }
+
+      // 3) آخر رسالة للبوت: بعد 15 دقيقة بالضبط يرسل 🤣🤣
+      const idleMs   = Math.max(60, Number(w.idleSec ?? global.config?.watcherIdleSec) || 900) * 1000;
+      const idleText = String(w.idleText ?? global.config?.watcherIdleText ?? "🤣🤣");
+      const lastTs = parseInt(lastMsg.timestamp) || 0;
+      if (idleText && lastTs && Date.now() - lastTs >= idleMs && _idleSentFor.get(tid) !== lastTs) {
+        _idleSentFor.set(tid, lastTs);
+        if (await sendText(api, tid, idleText)) {
+          log(`مرت ${Math.round(idleMs / 60000)} دقيقة على آخر رسالة للبوت في ${w.name || tid} — أُرسل ${idleText}`);
+        } else _idleSentFor.delete(tid);
+      }
     }
   } catch (e) {
     warn(`خطأ في الفحص: ${e.message}`);
