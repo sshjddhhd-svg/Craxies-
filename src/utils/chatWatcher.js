@@ -36,8 +36,8 @@ const MIN_GAP_MS           = 1500;   // أقل فاصل بين ردّين في �
 const RESEND_AFTER_MS      = 15000;  // إن لم يظهر ردّنا في السجل بعد هذه المدة نرسل مرة أخرى
 const MAX_BACKOFF_MS       = 8000; 
 const EVENT_TRUST_MS       = 20000;  // رسالة وصلت بالمستمع ولم تظهر بعد في السجل
-const DELAY_MIN_MS         = 20000;  // أقل وقت انتظار قبل الرد
-const DELAY_MAX_MS         = 30000;  // أقصى وقت انتظار قبل الرد
+const DELAY_MIN_MS         = 10000;  // أقل وقت انتظار قبل الرد
+const DELAY_MAX_MS         = 15000;  // أقصى وقت انتظار قبل الرد
 function randomDelay() { return DELAY_MIN_MS + Math.floor(Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS + 1)); }
 
 // نص الرد الثابت (يُرسل دائماً بغض النظر عن النص المحفوظ في الإعدادات)
@@ -238,7 +238,7 @@ async function checkThread(tid) {
     const readyAt = Math.max(s.nextTryAt, s.repliedAt + Math.max(cooldown, MIN_GAP_MS));
     if (now < readyAt) { retryIn = readyAt - now + 50; return; }
 
-    // مؤقت عشوائي 20-30 ثانية: يبدأ عند أول رسالة ليست للبوت ولا يُعاد ضبطه
+    // مؤقت عشوائي 10-15 ثانية: يبدأ عند أول رسالة ليست للبوت ولا يُعاد ضبطه
     // مهما أُرسلت رسائل أخرى. عند انتهائه نتحقق من جديد (أعلاه) ثم نرسل رسالة واحدة.
     if (!s.dueAt) {
       s.dueAt = now + randomDelay();
