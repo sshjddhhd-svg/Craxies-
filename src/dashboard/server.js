@@ -590,6 +590,59 @@ async function startDashboard(port) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ── Chat Watchers (مراقبة المحادثات) ───────────────────────────────────────
+  const watcher = require("../utils/chatWatcher");
+  global._dashIO = io;
+
+  app.get("/api/inbox", async (_req, res) => {
+    if (!global.api) return res.status(503).json({ error: "البوت غير متصل" });
+    try { res.json(await watcher.getInbox(global.api, 80)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/watchers", (_req, res) => {
+    res.json({ watchers: watcher.getWatchers(), intervalSec: global.config?.watcherIntervalSec || 4 });
+  });
+
+  app.post("/api/watchers", (req, res) => {
+    const { threadID, name, reply, cooldownSec = 0, enabled = true } = req.body || {};
+    if (!threadID) return res.status(400).json({ error: "اختر محادثة" });
+    if (!reply || !String(reply).trim()) return res.status(400).json({ error: "اكتب نص الرد" });
+    const list = watcher.getWatchers().slice();
+    const i = list.findIndex(w => String(w.threadID) === String(threadID));
+    const item = {
+      threadID: String(threadID), name: name || String(threadID), reply: String(reply),
+      cooldownSec: Math.max(0, parseInt(cooldownSec) || 0), enabled: !!enabled,
+      addedAt: i >= 0 ? list[i].addedAt : Date.now(),
+    };
+    if (i >= 0) list[i] = item; else list.push(item);
+    watcher.saveWatchers(list);
+    res.json({ success: true, watchers: list });
+  });
+
+  app.post("/api/watchers/:id/toggle", (req, res) => {
+    const list = watcher.getWatchers().slice();
+    const w = list.find(x => String(x.threadID) === req.params.id);
+    if (!w) return res.status(404).json({ error: "غير موجود" });
+    w.enabled = w.enabled === false;
+    if (w.enabled) w.addedAt = Date.now();
+    watcher.saveWatchers(list);
+    res.json({ success: true, watchers: list });
+  });
+
+  app.delete("/api/watchers/:id", (req, res) => {
+    const list = watcher.getWatchers().filter(x => String(x.threadID) !== req.params.id);
+    watcher.saveWatchers(list);
+    res.json({ success: true, watchers: list });
+  });
+
+  app.post("/api/watchers/interval", (req, res) => {
+    const sec = Math.min(60, Math.max(2, parseInt(req.body?.intervalSec) || 4));
+    global.config.watcherIntervalSec = sec;
+    watcher.saveWatchers(watcher.getWatchers());
+    res.json({ success: true, intervalSec: sec });
+  });
+
   // ── Thread Messages Buffer (live page) ────────────────────────────────────
   app.get("/api/threads/:id/messages", (req, res) => {
     const tid = req.params.id;
