@@ -546,7 +546,7 @@ input.ck-input:focus{border-color:var(--accent)}
   <div class="live-layout" id="live-layout" data-tab="groups">
     <!-- Panel 1: Groups -->
     <div class="live-panel" id="lp-groups">
-      <div class="live-panel-hdr">👥 المجموعات <span id="lp-grp-count" style="font-weight:400;color:var(--muted);font-size:.64rem;margin-right:auto"></span></div>
+      <div class="live-panel-hdr">💬 المحادثات (خاص + مجموعات) <span id="lp-grp-count" style="font-weight:400;color:var(--muted);font-size:.64rem;margin-right:auto"></span></div>
       <input class="live-search" id="lp-search" placeholder="🔍 بحث بالاسم أو ID…" oninput="filterLiveGroups(this.value)"/>
       <div id="lp-grp-list" style="overflow-y:auto;flex:1">
         <div class="live-empty">جارٍ التحميل…</div>
@@ -967,7 +967,8 @@ $('login-pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
 function initSocket(){
   _socket=io({transports:['polling','websocket']});
   _socket.on('bot-status',d=>updateStatus(d));
-  _socket.on('message',d=>{addLog(d);liveAppendMsg(d);});
+  _socket.on('message',d=>{addLog(d);liveUpsertThread(d);liveAppendMsg(d);});
+  _socket.on('threads-updated',()=>refreshLiveThreads());
   _socket.on('command',d=>addCmdLog(d));
   _socket.on('cookies-updated',d=>{
     loadCookieStatus();
@@ -987,7 +988,11 @@ function initSocket(){
     const el=$('inf-admins');if(el)el.textContent=(d.adminIDs||[]).length;
   });
 }
+let _lastBotStatus=null;
 function updateStatus(d){
+  if(d.status==='online'&&_lastBotStatus!=='online')setTimeout(()=>refreshLiveThreads(true),4000);
+  _lastBotStatus=d.status;
+  const _um=String(d.message||'').match(/\((\d{5,})\)/);if(_um)window._botUID=_um[1];
   const dot=$('sb-dot'),msg=$('sb-msg');
   dot.className='';
   if(d.status==='online')dot.classList.add('online');
@@ -1550,30 +1555,59 @@ function setLiveTab(tab,btn){
   const lay=$('live-layout');if(lay)lay.setAttribute('data-tab',tab);
 }
 async function loadLivePage(){
+  const el=$('lp-grp-list');if(el&&!_liveGroups.length)el.innerHTML='<div class="live-empty">⏳ جارٍ جلب كل محادثاتك (الخاص والمجموعات)…</div>';
   const [gr,cr,cmdR]=await Promise.all([
-    apiFetch('/api/threads'),
+    apiFetch('/api/threads?refresh=1'),
     apiFetch('/api/command-roles'),
     apiFetch('/api/commands')
   ]);
-  _liveGroups=gr.ok?gr.data:[];
+  _liveGroups=gr.ok&&Array.isArray(gr.data)?gr.data:[];
   _liveRoles=cr.ok?cr.data:{};
   _liveCmds=cmdR.ok?cmdR.data:[];
-  const cnt=$('lp-grp-count');if(cnt)cnt.textContent=`(${_liveGroups.length})`;
-  renderLiveGroups(_liveGroups);
+  _updLiveCount();
+  _renderLiveFiltered();
   renderLiveCmds();
 }
+let _liveRefreshT=null;
+function refreshLiveThreads(force){
+  clearTimeout(_liveRefreshT);
+  _liveRefreshT=setTimeout(async()=>{
+    const r=await apiFetch('/api/threads'+(force?'?refresh=1':''));
+    if(!r.ok||!Array.isArray(r.data))return;
+    _liveGroups=r.data;_updLiveCount();_renderLiveFiltered();
+  },400);
+}
+function _updLiveCount(){
+  const cnt=$('lp-grp-count');if(!cnt)return;
+  const dm=_liveGroups.filter(g=>g.isGroup===false).length;
+  cnt.textContent=`(${_liveGroups.length} — 👤 ${dm} خاص · 👥 ${_liveGroups.length-dm} مجموعة)`;
+}
+function _renderLiveFiltered(){const q=($('lp-search')||{}).value||'';filterLiveGroups(q);}
+function liveUpsertThread(m){
+  if(!m||!m.threadID)return;
+  const tid=String(m.threadID);
+  let g=_liveGroups.find(x=>x.threadID===tid);
+  if(!g){g={threadID:tid,name:m.isGroup?(m.threadName||tid):(m.senderID===String(window._botUID||'')?(m.threadName||tid):(m.senderName||m.threadName||tid)),isGroup:!!m.isGroup};_liveGroups.unshift(g);}
+  else{_liveGroups=[g,..._liveGroups.filter(x=>x!==g)];}
+  g.snippet=String(m.body||'').slice(0,60);g.timestamp=m.timestamp||Date.now();
+  _updLiveCount();_renderLiveFiltered();
+}
+function _escL(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function renderLiveGroups(list){
   const el=$('lp-grp-list');if(!el)return;
-  if(!list.length){el.innerHTML='<div class="live-empty">لا توجد مجموعات بعد — انتظر أول رسالة يستقبلها البوت</div>';return;}
+  if(!list.length){el.innerHTML='<div class="live-empty">لا توجد محادثات بعد — تأكد أن البوت متصل ثم اضغط 🔄 تحديث</div>';return;}
   el.innerHTML=list.map(g=>{
     const sel=_liveTID===g.threadID?'sel':'';
-    return`<div class="live-grp-item ${sel}" data-tid="${g.threadID}" onclick="selectLiveGroup('${g.threadID}','${String(g.name||g.threadID).replace(/'/g,"\\'")}')">
-      <div class="live-grp-name">${g.name||g.threadID}</div>
-      <div class="live-grp-id">${g.threadID}</div>
+    const icon=g.isGroup===false?'👤':(g.isGroup?'👥':'💬');
+    return`<div class="live-grp-item ${sel}" data-tid="${_escL(g.threadID)}" data-name="${_escL(g.name||g.threadID)}" onclick="selectLiveGroup(this.dataset.tid,this.dataset.name)">
+      <div class="live-grp-name">${icon} ${_escL(g.name||g.threadID)}</div>
+      ${g.snippet?`<div class="live-grp-last" style="color:var(--muted);font-size:.62rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_escL(g.snippet)}</div>`:'<div class="live-grp-last" style="display:none"></div>'}
+      <div class="live-grp-id">${_escL(g.threadID)}${g.isGroup===false?' · خاص':''}</div>
     </div>`;}).join('');
 }
 function filterLiveGroups(q){
-  const f=q?_liveGroups.filter(g=>(g.name||'').includes(q)||g.threadID.includes(q)):_liveGroups;
+  q=String(q||'').trim().toLowerCase();
+  const f=q?_liveGroups.filter(g=>String(g.name||'').toLowerCase().includes(q)||String(g.threadID).includes(q)):_liveGroups;
   renderLiveGroups(f);
 }
 async function selectLiveGroup(tid,name){

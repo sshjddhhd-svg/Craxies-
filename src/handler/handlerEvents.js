@@ -89,10 +89,24 @@ module.exports = async function handlerEvents(api, event, commands) {
 
   // ══ MESSAGE ══════════════════════════════════════════════════════════════════
   if (event.type === "message" || event.type === "message_reply") {
-    const { body = "", threadID, senderID, isGroup, messageID } = event;
+    const { body = "", threadID, senderID, messageID } = event;
+    // بعض إصدارات المكتبة لا ترسل isGroup للخاص — في الخاص يكون threadID = ID الطرف الآخر
+    const isGroup = typeof event.isGroup === "boolean"
+      ? event.isGroup
+      : String(threadID) !== String(senderID);
 
-    // Ignore self
-    if (senderID === api.getCurrentUserID()) return;
+    // رسائلي أنا (من الهاتف مثلاً): تُعرض في اللوحة فقط بدون تنفيذ أوامر
+    if (String(senderID) === String(api.getCurrentUserID())) {
+      try {
+        const known = require("../utils/threadSync").get(threadID);
+        const selfMsg = { senderID: String(senderID), senderName: "أنا (البوت)", threadID: String(threadID),
+          threadName: known?.name || String(threadID), body, isGroup, messageID, timestamp: Date.now() };
+        require("../utils/threadSync").touch({ threadID, name: known?.name, isGroup, snippet: body });
+        if (typeof global._bufferMsg === "function") global._bufferMsg(selfMsg);
+        if (io) io.emit("message", selfMsg);
+      } catch (_) {}
+      return;
+    }
 
     // ── Permissions (computed early for lock check) ────────────────────────
     const isOwner = global.isOwner ? global.isOwner(senderID) : String(senderID) === String(global.ownerID);
@@ -118,7 +132,10 @@ module.exports = async function handlerEvents(api, event, commands) {
       getOrCreateThread(threadID, threadName).catch(() => {}),
     ]);
 
-    const msgData = { senderID, senderName, threadID, threadName, body, isGroup, messageID, timestamp: Date.now() };
+    const msgData = { senderID: String(senderID), senderName, threadID: String(threadID), threadName, body, isGroup, messageID, timestamp: Date.now() };
+
+    // أضف المحادثة فوراً لقائمة لوحة التحكم (خاص أو مجموعة)
+    try { require("../utils/threadSync").touch({ threadID, name: threadName, isGroup, snippet: body, timestamp: msgData.timestamp }); } catch (_) {}
 
     // Buffer message for live dashboard page
     if (typeof global._bufferMsg === "function") global._bufferMsg(msgData);

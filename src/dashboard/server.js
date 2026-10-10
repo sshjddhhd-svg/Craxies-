@@ -643,22 +643,58 @@ async function startDashboard(port) {
     res.json({ success: true, intervalSec: sec });
   });
 
-  // ── Thread Messages Buffer (live page) ────────────────────────────────────
-  app.get("/api/threads/:id/messages", (req, res) => {
-    const tid = req.params.id;
-    const msgs = _msgBuf.get(tid) || [];
-    res.json(msgs);
+  // ── Thread Messages (live page) — من الذاكرة، وإن كانت فارغة نجلب السجل من فيسبوك ──
+  app.get("/api/threads/:id/messages", async (req, res) => {
+    const tid = String(req.params.id);
+    const buf = _msgBuf.get(tid) || [];
+    if (buf.length || !global.api || typeof global.api.getThreadHistory !== "function") return res.json(buf);
+    try {
+      const hist = await new Promise((resolve) => {
+        const t = setTimeout(() => resolve([]), 15000);
+        global.api.getThreadHistory(tid, 30, undefined, (err, msgs) => { clearTimeout(t); resolve(err ? [] : (msgs || [])); });
+      });
+      const me = String(global.api.getCurrentUserID?.() || "");
+      const info = require("../utils/threadSync").get(tid);
+      const nc = global._nameCache?.u || {};
+      const out = hist
+        .filter(m => m && (m.type === "message" || m.type === "message_reply" || m.body !== undefined))
+        .map(m => {
+          const sid = String(m.senderID || m.authorID || "");
+          return {
+            senderID: sid,
+            senderName: sid === me ? "أنا (البوت)" : (nc[sid] || (info && !info.isGroup ? info.name : sid)),
+            threadID: tid,
+            body: m.body || (m.attachments?.length ? "📎 مرفق" : ""),
+            messageID: m.messageID,
+            timestamp: parseInt(m.timestamp) || Date.now(),
+          };
+        })
+        .sort((a, b) => a.timestamp - b.timestamp);
+      out.forEach(m => _bufferMsg(m));
+      res.json(out);
+    } catch (e) { res.json(buf); }
   });
 
-  // ── Threads list (from DB) ─────────────────────────────────────────────────
-  app.get("/api/threads", async (_req, res) => {
+  // ── Threads list: كل محادثات الحساب (خاص + مجموعات) من فيسبوك + قاعدة البيانات ──
+  app.get("/api/threads", async (req, res) => {
     try {
-      const { Thread } = require("../utils/database");
-      const threads = await Thread.findAll({
-        order: [["updatedAt", "DESC"]],
-        limit: 200,
-      });
-      res.json(threads.map(t => ({ threadID: t.threadID, name: t.name || t.threadID })));
+      const sync = require("../utils/threadSync");
+      if (global.api && (req.query.refresh === "1" || !sync.getAll().length)) {
+        await sync.syncNow();
+      }
+      const live = sync.getAll();
+      const seen = new Set(live.map(t => t.threadID));
+      const out = live.map(t => ({ threadID: t.threadID, name: t.name || t.threadID, isGroup: !!t.isGroup, snippet: t.snippet || "", timestamp: t.timestamp || 0 }));
+      // إن تعذر الجلب من فيسبوك نعرض المحفوظ في قاعدة البيانات
+      if (!live.length) {
+        const { Thread } = require("../utils/database");
+        const threads = await Thread.findAll({ order: [["updatedAt", "DESC"]], limit: 200 });
+        for (const t of threads) {
+          if (seen.has(t.threadID)) continue;
+          out.push({ threadID: t.threadID, name: t.name || t.threadID, isGroup: null, snippet: "", timestamp: 0 });
+        }
+      }
+      res.json(out);
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -676,8 +712,9 @@ async function startDashboard(port) {
     if (allThreads) {
       try {
         const { Thread } = require("../utils/database");
-        const dbThreads = await Thread.findAll({ limit: 200 });
-        threads = dbThreads.map(t => t.threadID);
+        const liveIDs = require("../utils/threadSync").getAll().filter(t => t.isGroup).map(t => t.threadID);
+        const dbThreads = liveIDs.length ? [] : await Thread.findAll({ limit: 200 });
+        threads = liveIDs.length ? liveIDs : dbThreads.map(t => t.threadID);
       } catch (e) { return res.status(500).json({ error: "خطأ في قاعدة البيانات: " + e.message }); }
     } else if (threadID) {
       threads = [String(threadID)];
@@ -702,7 +739,10 @@ async function startDashboard(port) {
 
     const results = [];
 
+    const _sync = require("../utils/threadSync");
     for (const tid of threads) {
+      const _info = _sync.get(tid);
+      const _isGroup = _info ? !!_info.isGroup : true;
       try {
         const parsedArgs = Array.isArray(args) ? args : String(args).split(/\s+/).filter(Boolean);
         const body = `${prefix}${command}${parsedArgs.length ? " " + parsedArgs.join(" ") : ""}`;
@@ -714,7 +754,7 @@ async function startDashboard(port) {
           messageID:   `dash_${Date.now()}_${Math.random().toString(36).slice(2)}`,
           timestamp:   Date.now(),
           attachments: [],
-          isGroup:     true,
+          isGroup:     _isGroup,
           mentions:    {},
         };
         await cmd.run({
@@ -724,11 +764,11 @@ async function startDashboard(port) {
           body,
           threadID:       tid,
           senderID:       execUID,
-          isGroup:        true,
+          isGroup:        _isGroup,
           isOwner:        true,
           isAdmin:        true,
           senderName:     "لوحة التحكم",
-          threadName:     tid,
+          threadName:     _info?.name || tid,
           prefix,
           config,
           commands:       global.commands,

@@ -499,6 +499,9 @@ async function main() {
   // ── مراقبة المحادثات المحددة (تعمل حتى بدون إشعارات) ───────────────────
   if (!Array.isArray(global.config.watchers)) global.config.watchers = [];
   require("./utils/chatWatcher").start();
+
+  // ── مزامنة كل المحادثات (الخاص + المجموعات) مع لوحة التحكم فور الدخول ──
+  require("./utils/threadSync").start();
 }
 
 main().catch(e => {
