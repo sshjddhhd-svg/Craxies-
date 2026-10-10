@@ -611,8 +611,8 @@ input.ck-input:focus{border-color:var(--accent)}
       <div id="w-inbox" style="max-height:360px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"><div class="live-empty">جارٍ التحميل…</div></div>
       <div id="w-form" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
         <div style="margin-bottom:8px">المحادثة المختارة: <b id="w-sel-name"></b></div>
-        <div class="form-row"><label>نص الرد التلقائي</label><textarea id="w-reply" rows="3" placeholder="مثال: أهلاً، سأرد عليك قريباً"></textarea></div>
-        <div class="form-row"><label>مهلة بين الردود (ثانية، 0 = رد على كل رسالة)</label><input id="w-cooldown" type="number" min="0" value="0"/></div>
+        <div class="form-row"><label>نص الرد الثابت لهذه المحادثة</label><textarea id="w-reply" rows="3" placeholder="اكتب نص الرد الثابت"></textarea><small style="display:block;color:var(--muted);margin-top:6px">لا يرسل تلقائياً على الرسائل العادية؛ اذكر البوت أو أرسل /ردالمراقبة. يبدأ مؤقتاً عشوائياً بين 20 و30 ثانية، ولا يعاد ضبطه بالرسائل اللاحقة.</small></div>
+        <div class="form-row"><label>الحد الأدنى بين الردود (ثانية، 60 على الأقل)</label><input id="w-cooldown" type="number" min="60" value="60"/></div>
         <button class="btn btn-primary" onclick="saveWatcher()">👁️ بدء المراقبة</button>
       </div>
     </div>
@@ -1738,7 +1738,7 @@ function renderWatchers(list){
     const on=w.enabled!==false;
     return `<div class="w-row${on?'':' off'}">
     <label class="toggle-sw sm" title="${on?'مفعّل — اضغط للإيقاف':'متوقف — اضغط للتفعيل'}"><input type="checkbox" ${on?'checked':''} onchange="toggleWatcher('${w.threadID}',this)"><div class="track"></div><div class="thumb"></div></label>
-    <div class="w-info"><div class="w-name">${_esc(w.name)}</div><div class="w-sub">↩️ ${_esc(w.reply)}${w.cooldownSec?` · كل ${w.cooldownSec}ث`:''}</div></div>
+    <div class="w-info"><div class="w-name">${_esc(w.name)}</div><div class="w-sub">↩️ ${_esc(w.reply)} · كل ${Math.max(60,Number(w.cooldownSec)||0)}ث</div></div>
     <button class="w-del" title="حذف" onclick="deleteWatcher('${w.threadID}')">✕</button>
   </div>`;}).join('');
 }
