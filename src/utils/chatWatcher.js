@@ -1,20 +1,24 @@
 "use strict";
 /**
- * chatWatcher.js — مراقبة الغروبات: البوت يكون دائماً صاحب آخر رسالة.
+ * chatWatcher.js — مراقبة الغروبات: البوت يبقى دائماً صاحب آخر رسالة.
  *
- * الفكرة: لكل غروب حالة واحدة فقط "هل آخر رسالة ليست للبوت؟".
- *  - أي رسالة من شخص آخر  → الغروب يصبح "يحتاج رداً".
- *  - أي رسالة من البوت     → الغروب "منتهٍ" (لا إرسال).
- *  - عامل إرسال واحد لكل غروب يرسل رداً واحداً على أحدث رسالة، ثم يتحقق:
- *    إن وصلت رسائل جديدة أثناء الإرسال يرد مرة أخرى، وإلا يتوقف.
- *  لذلك الرسائل السريعة جداً لا تُتجاهل ولا تسبب سيل ردود؛ تُدمج في رد واحد
- *  وتكون آخر رسالة دائماً للبوت.
+ * الطريقة (بسيطة ومباشرة كما طلبت):
+ *  - كل 4 ثوانٍ يقرأ البوت سجل كل غروب مُراقَب من فيسبوك نفسه.
+ *  - إن كانت آخر رسالة في الغروب للبوت → لا يفعل شيئاً.
+ *  - إن كانت آخر رسالة لشخص آخر → يرسل الرد فوراً.
+ *  - بالإضافة لذلك: أي رسالة جديدة تصل عبر المستمع تُطلق فحصاً فورياً،
+ *    فلا ينتظر البوت الـ 4 ثوانٍ.
  *
- *  الحماية من التوقف:
- *  - مهلة لكل إرسال وقراءة، ولا يوجد قفل عام يمكن أن يعلق.
- *  - لا تخلٍّ نهائي عن غروب بعد فشل: إعادة محاولة مع تأخير متزايد (حتى 60 ثانية).
- *  - فحص دوري للسجل يلتقط أي رسالة لم تصل عبر المستمع.
- *  - مراقب (watchdog) يعيد تشغيل الحلقة إن توقفت، ويحرر أي عامل عالق.
+ * لماذا لن يتجاهل الرسائل السريعة بعد الآن:
+ *  - لا مقارنة بين ساعة السيرفر وساعة فيسبوك (كانت سبب تجاهل الرسائل).
+ *    القرار يعتمد فقط على: "مَن صاحب آخر رسالة؟" ومعرّف الرسالة.
+ *  - إن وصلت رسائل أثناء الإرسال، يُعاد الفحص مباشرة بعد انتهاء الإرسال.
+ *
+ * لماذا لن يتوقف:
+ *  - مهلة لكل قراءة وإرسال، وكل غروب مستقل عن الآخر.
+ *  - لا يتخلى عن أي غروب أبداً؛ عند الفشل يعيد المحاولة (أقصى انتظار 8 ثوانٍ).
+ *  - إن فشلت قراءة السجل يعتمد على آخر رسالة وصلت عبر المستمع.
+ *  - مراقب (watchdog) يعيد تشغيل الحلقة إن توقفت ويحرّر أي غروب عالق.
  *  - يستخدم دائماً global.api الحالي (يعمل بعد إعادة تسجيل الدخول).
  */
 
@@ -23,26 +27,37 @@ const path = require("path");
 
 const CONFIG_PATH = path.join(__dirname, "../../config.json");
 
-const SEND_TIMEOUT_MS    = 30000;
-const HISTORY_TIMEOUT_MS = 15000;
-const WORKER_STUCK_MS    = 90000;
-const MIN_GAP_MS         = 1200;   // أقل فاصل بين ردّين في نفس الغروب (حماية من حظر فيسبوك)
-const MAX_BACKOFF_MS     = 60000;
-const HISTORY_AMOUNT     = 10;
+const DEFAULT_INTERVAL_SEC = 4;
+const HISTORY_AMOUNT       = 8;
+const HISTORY_TIMEOUT_MS   = 12000;
+const SEND_TIMEOUT_MS      = 25000;
+const BUSY_STUCK_MS        = 60000;
+const MIN_GAP_MS           = 1500;   // أقل فاصل بين ردّين في نفس الغروب (حماية من حظر فيسبوك)
+const RESEND_AFTER_MS      = 15000;  // إن لم يظهر ردّنا في السجل بعد هذه المدة نرسل مرة أخرى
+const MAX_BACKOFF_MS       = 8000; 
+const EVENT_TRUST_MS       = 20000;  // رسالة وصلت بالمستمع ولم تظهر بعد في السجل
 
-const log  = (m) => (global.log?.info || console.log)(`👁️ [مراقبة] ${m}`);
-const warn = (m) => (global.log?.warn || console.warn)(`👁️ [مراقبة] ${m}`);
+const log  = (m) => { try { (global.log?.info || console.log)(`👁️ [مراقبة] ${m}`); } catch (_) {} };
+const warn = (m) => { try { (global.log?.warn || console.warn)(`👁️ [مراقبة] ${m}`); } catch (_) {} };
 
-/** tid -> { dirty, lastOtherTs, lastOtherMid, lastBotTs, sending, sendingSince, fails, nextTryAt, wake } */
+/**
+ * لكل غروب:
+ *  last       : آخر رسالة معروفة { mid, sender, mine }
+ *  evt        : آخر رسالة وصلت عبر المستمع من شخص آخر { mid, at }
+ *  repliedTo  : معرّف الرسالة التي رددنا بعدها آخر مرة
+ *  repliedAt  : وقت آخر رد ناجح (ساعة السيرفر — للفواصل فقط)
+ *  busy/busySince/again : منع التداخل + إعادة الفحص إن وصلت رسائل أثناء العمل
+ *  fails/nextTryAt      : إعادة المحاولة عند الفشل
+ */
 const _state = new Map();
-let _timer = null, _watchdog = null, _running = false, _scanning = false, _scanSince = 0, _lastTick = 0;
+let _timer = null, _watchdog = null, _running = false, _lastTick = 0;
 
 function S(tid) {
   tid = String(tid);
   let s = _state.get(tid);
   if (!s) {
-    s = { dirty: false, lastOtherTs: 0, lastOtherMid: null, lastBotTs: 0, sending: false,
-          sendingSince: 0, fails: 0, nextTryAt: 0, wake: null, initialized: false };
+    s = { last: null, evt: null, repliedTo: null, repliedAt: 0, busy: false, busySince: 0,
+          again: false, fails: 0, nextTryAt: 0, kickTimer: null };
     _state.set(tid, s);
   }
   return s;
@@ -50,6 +65,10 @@ function S(tid) {
 
 function api() { return global.api || null; }
 function myID(a) { try { return String(a?.getCurrentUserID?.() || ""); } catch { return ""; } }
+function intervalMs() {
+  const sec = Number(global.config?.watcherIntervalSec) || DEFAULT_INTERVAL_SEC;
+  return Math.max(3, Math.min(60, sec)) * 1000;
+}
 
 function withTimeout(promise, ms, fallback) {
   return new Promise((resolve) => {
@@ -61,6 +80,8 @@ function withTimeout(promise, ms, fallback) {
     );
   });
 }
+
+/* ───────────── الإعدادات ───────────── */
 
 function getWatchers() {
   const list = global.config?.watchers;
@@ -76,10 +97,15 @@ function saveWatchers(list) {
     if (global.config.watcherIntervalSec) cfg.watcherIntervalSec = global.config.watcherIntervalSec;
     fs.writeJsonSync(CONFIG_PATH, cfg, { spaces: 2 });
   } catch (e) { warn(`فشل حفظ config.json: ${e.message}`); }
-  // نظّف حالة الغروبات المحذوفة/المعطّلة
   for (const tid of [..._state.keys()]) {
-    if (!list.some(w => String(w.threadID) === tid && w.enabled !== false)) _state.delete(tid);
+    if (!list.some(w => String(w.threadID) === tid && w.enabled !== false)) {
+      const s = _state.get(tid);
+      if (s?.kickTimer) clearTimeout(s.kickTimer);
+      _state.delete(tid);
+    }
   }
+  // فحص فوري للغروبات الجديدة/المعدّلة
+  for (const w of list) if (w.enabled !== false) kick(w.threadID, 200);
   return list;
 }
 
@@ -88,24 +114,33 @@ function findWatcher(threadID) {
 }
 
 function tsOf(m) { return parseInt(m?.timestamp) || 0; }
-function senderOf(m) { return String(m?.senderID || m?.authorID || ""); }
+function senderOf(m) { return String(m?.senderID || m?.authorID || m?.author || ""); }
 
-/* ───────────── تسجيل الرسائل ───────────── */
+/* ───────────── قراءة السجل ───────────── */
 
-function noteOther(tid, ts, mid) {
-  const s = S(tid);
-  ts = ts || Date.now();
-  if (ts < s.lastOtherTs) return;
-  s.lastOtherTs = ts;
-  if (mid) s.lastOtherMid = mid;
-  if (ts > s.lastBotTs) { s.dirty = true; kick(tid); }
+function getHistory(a, threadID) {
+  return withTimeout(new Promise((res) => {
+    if (typeof a.getThreadHistory !== "function") return res(null);
+    try {
+      const p = a.getThreadHistory(String(threadID), HISTORY_AMOUNT, undefined,
+        (err, msgs) => res(err ? null : (Array.isArray(msgs) ? msgs : [])));
+      if (p && typeof p.catch === "function") p.catch(() => res(null));
+    } catch { res(null); }
+  }), HISTORY_TIMEOUT_MS, null);
 }
 
-function noteBot(tid, ts) {
-  const s = S(tid);
-  ts = ts || Date.now();
-  if (ts > s.lastBotTs) s.lastBotTs = ts;
-  if (s.lastBotTs >= s.lastOtherTs) s.dirty = false;
+/** آخر رسالة حقيقية في السجل (نتجاهل أحداث النظام مثل "انضم فلان") */
+function lastFromHistory(hist, me) {
+  const msgs = hist
+    .map((m, i) => ({ m, i }))
+    .filter(({ m }) => m && !m.error && senderOf(m) && (!m.type || /^message/.test(String(m.type))));
+  if (!msgs.length) return { last: null, mids: new Set() };
+  msgs.sort((x, y) => (tsOf(x.m) - tsOf(y.m)) || (x.i - y.i));
+  const l = msgs[msgs.length - 1].m;
+  return {
+    last: { mid: String(l.messageID || ""), sender: senderOf(l), mine: senderOf(l) === me },
+    mids: new Set(msgs.map(({ m }) => String(m.messageID || ""))),
+  };
 }
 
 /* ───────────── الإرسال ───────────── */
@@ -114,75 +149,107 @@ function rawSend(a, tid, text, replyTo) {
   return withTimeout(new Promise((res) => {
     try {
       const cb = (err, info) => res(err ? { ok: false, err } : { ok: true, info });
-      if (replyTo) a.sendMessage({ body: text }, String(tid), cb, replyTo);
-      else a.sendMessage({ body: text }, String(tid), cb);
+      const p = replyTo
+        ? a.sendMessage({ body: text }, String(tid), cb, replyTo)
+        : a.sendMessage({ body: text }, String(tid), cb);
+      // المكتبة ترمي الخطأ أيضاً كـ Promise — نلتقطه حتى لا يصبح "رفضاً غير معالج"
+      if (p && typeof p.catch === "function") p.catch((err) => res({ ok: false, err }));
     } catch (e) { res({ ok: false, err: e }); }
   }), SEND_TIMEOUT_MS, { ok: false, err: new Error("انتهت مهلة الإرسال") });
 }
 
 async function sendReply(a, w, replyTo) {
   const text = String(w.reply || "").trim();
-  if (!text) return false;
+  if (!text) return null;
   let r = await rawSend(a, w.threadID, text, replyTo);
-  if (!r.ok && replyTo) r = await rawSend(a, w.threadID, text, null); // الرسالة ربما حُذفت
+  if (!r.ok && replyTo) r = await rawSend(a, w.threadID, text, null); // ربما حُذفت الرسالة
   if (!r.ok) {
     const e = r.err;
     warn(`فشل الرد على ${w.name || w.threadID}: ${e?.error || e?.message || e}`);
-    return false;
+    return null;
   }
   log(`✔️ تم الرد على ${w.name || w.threadID}`);
   try { global._dashIO?.emit("watcher-reply", { threadID: w.threadID, name: w.name, ts: Date.now() }); } catch (_) {}
-  return true;
+  return { mid: String(r.info?.messageID || "") };
 }
 
-/** يوقظ عامل الغروب (أو يجدول إيقاظه) */
+/* ───────────── فحص غروب واحد ───────────── */
+
 function kick(tid, delay = 0) {
-  tid = String(tid);
+  if (!_running) return;
   const s = S(tid);
-  if (s.sending) return; // العامل الحالي سيتحقق من الحالة بعد انتهائه
-  if (s.wake) { clearTimeout(s.wake); s.wake = null; }
-  s.wake = setTimeout(() => { s.wake = null; runWorker(tid).catch(e => warn(`خطأ العامل: ${e.message}`)); }, Math.max(0, delay));
+  if (s.busy) { s.again = true; return; }
+  if (s.kickTimer) return; // فحص مجدول بالفعل
+  s.kickTimer = setTimeout(() => {
+    s.kickTimer = null;
+    checkThread(String(tid)).catch(e => warn(`خطأ في الفحص: ${e.message}`));
+  }, Math.max(0, delay));
 }
 
-async function runWorker(tid) {
+async function checkThread(tid) {
   const s = S(tid);
-  if (s.sending) return;
-  s.sending = true; s.sendingSince = Date.now();
+  if (s.busy) { s.again = true; return; }
+  s.busy = true; s.busySince = Date.now(); s.again = false;
+  let retryIn = 0;
   try {
-    while (_running) {
-      const w = findWatcher(tid);
-      if (!w) { s.dirty = false; break; }
-      if (!s.dirty) break;
+    const w = findWatcher(tid);
+    const a = api();
+    if (!w || !a) return;
+    const me = myID(a);
+    if (!me) return; // لا نعرف حساب البوت بعد — لا نرسل حتى لا نرد على أنفسنا
 
-      const a = api();
-      if (!a) break; // سيُعاد عبر المراقب الدوري
+    // 1) اقرأ السجل الحقيقي من فيسبوك
+    const fetchStart = Date.now();
+    const hist = await getHistory(a, tid);
+    if (!_running) return;
 
-      const now = Date.now();
-      const cooldown = Math.max(0, Number(w.cooldownSec) || 0) * 1000;
-      const waitUntil = Math.max(s.nextTryAt, s.lastBotTs + Math.max(cooldown, MIN_GAP_MS));
-      if (now < waitUntil) {
-        s.sending = false;
-        kick(tid, waitUntil - now + 50);
-        return;
+    let last = s.last;
+    if (hist) {
+      const r = lastFromHistory(hist, me);
+      if (r.last) last = r.last;
+      // رسالة وصلت بالمستمع ولم تظهر بعد في السجل؟ اعتمد عليها
+      if (s.evt && !r.mids.has(s.evt.mid) && s.evt.at >= fetchStart - EVENT_TRUST_MS) {
+        last = { mid: s.evt.mid, sender: "event", mine: false };
+      } else if (s.evt && r.mids.has(s.evt.mid)) {
+        s.evt = null;
       }
+    } else if (s.evt && (!s.last || s.last.mid !== s.evt.mid)) {
+      // فشلت القراءة: استخدم آخر رسالة وصلت بالمستمع
+      last = { mid: s.evt.mid, sender: "event", mine: false };
+    }
+    if (!last) return;
+    s.last = last;
 
-      const startedAt = Date.now();
-      const replyTo = s.lastOtherMid;
-      const ok = await sendReply(a, w, replyTo);
-      if (ok) {
-        s.fails = 0; s.nextTryAt = 0;
-        // نعتبر وقت الرد = بداية الإرسال؛ أي رسالة وصلت بعدها تُبقي الغروب "يحتاج رداً"
-        noteBot(tid, Math.max(startedAt, s.lastBotTs));
-        if (s.lastOtherTs > startedAt) s.dirty = true;
-      } else {
-        s.fails++;
-        const back = Math.min(MAX_BACKOFF_MS, 2000 * Math.pow(2, Math.min(s.fails - 1, 5)));
-        s.nextTryAt = Date.now() + back;
-        warn(`سيُعاد الرد على ${w.name || tid} بعد ${Math.round(back / 1000)} ث (محاولة ${s.fails})`);
-      }
+    // 2) آخر رسالة للبوت → لا شيء
+    if (last.mine) { s.fails = 0; return; }
+
+    // 3) آخر رسالة لشخص آخر → أرسل
+    const now = Date.now();
+    // رددنا للتو على نفس الرسالة والسجل لم يتحدث بعد؟ انتظر قليلاً قبل الإعادة
+    if (s.repliedTo && s.repliedTo === last.mid && now - s.repliedAt < RESEND_AFTER_MS) return;
+
+    const cooldown = Math.max(0, Number(w.cooldownSec) || 0) * 1000;
+    const readyAt = Math.max(s.nextTryAt, s.repliedAt + Math.max(cooldown, MIN_GAP_MS));
+    if (now < readyAt) { retryIn = readyAt - now + 50; return; }
+
+    const sent = await sendReply(a, w, last.mid || undefined);
+    if (sent) {
+      s.fails = 0; s.nextTryAt = 0;
+      s.repliedTo = last.mid; s.repliedAt = Date.now();
+      s.last = { mid: sent.mid || `sent-${Date.now()}`, sender: me, mine: true };
+      if (s.evt && s.evt.mid === last.mid) s.evt = null;
+    } else {
+      s.fails++;
+      const back = Math.min(MAX_BACKOFF_MS, 2000 * Math.pow(2, Math.min(s.fails - 1, 4)));
+      s.nextTryAt = Date.now() + back;
+      retryIn = back + 50;
+      warn(`سيُعاد الرد على ${w.name || tid} بعد ${Math.round(back / 1000)} ث (محاولة ${s.fails})`);
     }
   } finally {
-    s.sending = false;
+    s.busy = false;
+    // وصلت رسائل أثناء العمل؟ افحص فوراً حتى تبقى آخر رسالة للبوت
+    if (s.again) { s.again = false; kick(tid, 300); }
+    else if (retryIn) kick(tid, retryIn);
   }
 }
 
@@ -190,89 +257,59 @@ async function runWorker(tid) {
 
 function onEvent(_api, event) {
   try {
-    if (!event) return;
+    if (!_running || !event) return;
     if (event.type !== "message" && event.type !== "message_reply") return;
     const tid = String(event.threadID || "");
     if (!tid || !findWatcher(tid)) return;
     const a = api() || _api;
     const sender = senderOf(event);
     if (!sender) return;
-    if (sender === myID(a)) { noteBot(tid, tsOf(event) || Date.now()); return; }
-    noteOther(tid, Math.max(tsOf(event), 1) || Date.now(), event.messageID);
+    const s = S(tid);
+    if (sender === myID(a)) {
+      s.last = { mid: String(event.messageID || ""), sender, mine: true };
+      return;
+    }
+    const mid = String(event.messageID || `evt-${Date.now()}`);
+    s.evt = { mid, at: Date.now() };
+    s.last = { mid, sender, mine: false };
+    kick(tid, 250); // تأخير بسيط لدمج الرسائل المتتالية السريعة في رد واحد
   } catch (e) { warn(`خطأ في المستمع: ${e.message}`); }
 }
 
-/* ───────────── الفحص الدوري (شبكة أمان) ───────────── */
-
-function getHistory(a, threadID, amount) {
-  return withTimeout(new Promise((res) => {
-    if (typeof a.getThreadHistory !== "function") return res(null);
-    try { a.getThreadHistory(threadID, amount, undefined, (err, msgs) => res(err ? null : (msgs || []))); }
-    catch { res(null); }
-  }), HISTORY_TIMEOUT_MS, null);
-}
-
-function isRealMessage(m) {
-  if (!m || !senderOf(m)) return false;
-  if (m.type && !/^message/.test(String(m.type))) return false;
-  return true;
-}
-
-async function scanThread(a, w, me) {
-  const tid = String(w.threadID);
-  const s = S(tid);
-  const hist = await getHistory(a, tid, HISTORY_AMOUNT);
-  if (!hist) return;
-  const msgs = hist.filter(isRealMessage).sort((x, y) => tsOf(x) - tsOf(y));
-  const last = msgs[msgs.length - 1];
-  s.initialized = true;
-  if (!last) return;
-  const lts = tsOf(last) || Date.now();
-  if (senderOf(last) === me) noteBot(tid, lts);
-  else noteOther(tid, lts, last.messageID);
-  if (s.dirty && !s.sending && !s.wake) kick(tid);
-}
+/* ───────────── الحلقة الدورية (كل 4 ثوانٍ) ───────────── */
 
 async function scanOnce() {
-  const a = api();
-  if (!a) return;
-  if (_scanning && Date.now() - _scanSince < 120000) return;
-  _scanning = true; _scanSince = Date.now();
-  try {
-    const me = myID(a);
-    const list = getWatchers().filter(w => w.enabled !== false);
-    await Promise.all(list.map(w =>
-      scanThread(a, w, me).catch(e => warn(`خطأ في ${w.name || w.threadID}: ${e.message}`))
-    ));
-  } finally { _scanning = false; }
+  if (!api()) return;
+  for (const w of getWatchers()) {
+    if (w.enabled === false) continue;
+    kick(w.threadID, 0);
+  }
 }
 
-function schedule() {
+function loop() {
   if (!_running) return;
   if (_timer) clearTimeout(_timer);
-  const sec = Math.max(2, Number(global.config?.watcherIntervalSec) || 4);
-  _timer = setTimeout(async () => {
+  _timer = setTimeout(() => {
     _lastTick = Date.now();
-    try { await scanOnce(); } catch (e) { warn(`خطأ: ${e.message}`); }
-    schedule();
-  }, sec * 1000);
+    try { scanOnce(); } catch (e) { warn(`خطأ: ${e.message}`); }
+    loop();
+  }, intervalMs());
 }
 
 function watchdog() {
   if (!_running) return;
-  const sec = Math.max(2, Number(global.config?.watcherIntervalSec) || 4);
-  // الحلقة الدورية توقفت؟ أعد تشغيلها
-  if (Date.now() - _lastTick > sec * 1000 * 4 + 30000) {
+  if (Date.now() - _lastTick > intervalMs() * 3 + 5000) {
     warn("الحلقة الدورية متوقفة — إعادة تشغيل");
-    _scanning = false; _lastTick = Date.now(); schedule();
+    _lastTick = Date.now();
+    loop();
+    scanOnce();
   }
-  // عامل عالق؟ حرّره وأعد المحاولة
   for (const [tid, s] of _state) {
-    if (s.sending && Date.now() - s.sendingSince > WORKER_STUCK_MS) {
-      warn(`عامل الغروب ${tid} عالق — تم تحريره`);
-      s.sending = false;
+    if (s.busy && Date.now() - s.busySince > BUSY_STUCK_MS) {
+      warn(`الغروب ${tid} عالق — تم تحريره`);
+      s.busy = false;
+      kick(tid, 0);
     }
-    if (s.dirty && !s.sending && !s.wake) kick(tid);
   }
 }
 
@@ -280,11 +317,10 @@ function start() {
   if (_running) return;
   _running = true;
   _lastTick = Date.now();
-  log("🚀 المراقبة تعمل — البوت سيبقى صاحب آخر رسالة في كل غروب مُراقَب");
-  schedule();
-  _watchdog = setInterval(() => { try { watchdog(); } catch (e) { warn(e.message); } }, 10000);
-  if (_watchdog.unref) _watchdog.unref();
-  scanOnce().catch(() => {});
+  log(`🚀 المراقبة تعمل — فحص كل ${intervalMs() / 1000} ثوانٍ، البوت سيبقى صاحب آخر رسالة`);
+  loop();
+  _watchdog = setInterval(() => { try { watchdog(); } catch (e) { warn(e.message); } }, 5000);
+  scanOnce();
 }
 
 function stop() {
@@ -292,20 +328,22 @@ function stop() {
   if (_timer) clearTimeout(_timer);
   if (_watchdog) clearInterval(_watchdog);
   _timer = null; _watchdog = null;
-  for (const s of _state.values()) if (s.wake) { clearTimeout(s.wake); s.wake = null; }
+  for (const s of _state.values()) if (s.kickTimer) { clearTimeout(s.kickTimer); s.kickTimer = null; }
 }
 
-// لا تدع خطأ غير معالج يُسقط المراقبة
+// لا تدع خطأ غير معالج يُسقط البوت أو المراقبة
 if (!global.__chatWatcherGuards) {
   global.__chatWatcherGuards = true;
-  process.on("unhandledRejection", (e) => warn(`رفض غير معالج: ${e?.message || e}`));
+  process.on("unhandledRejection", (e) => warn(`رفض غير معالج: ${e?.message || e?.error || e}`));
 }
+
+/* ───────────── قائمة المحادثات للوحة التحكم ───────────── */
 
 function getInbox(a, limit = 60) {
   return new Promise((res, rej) => {
     if (typeof a.getThreadList !== "function") return rej(new Error("getThreadList غير متاح"));
-    a.getThreadList(limit, null, ["INBOX"], (err, threads) => {
-      if (err) return rej(new Error(err.message || String(err)));
+    const p = a.getThreadList(limit, null, ["INBOX"], (err, threads) => {
+      if (err) return rej(new Error(err.message || err.error || String(err)));
       const me = myID(a);
       const out = (threads || []).map(t => {
         const isGroup = !!t.isGroup;
@@ -327,6 +365,7 @@ function getInbox(a, limit = 60) {
       });
       res(out);
     });
+    if (p && typeof p.catch === "function") p.catch(() => {});
   });
 }
 
