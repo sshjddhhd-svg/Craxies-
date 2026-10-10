@@ -594,6 +594,15 @@ async function startDashboard(port) {
   const watcher = require("../utils/chatWatcher");
   global._dashIO = io;
 
+  const snap = require("../utils/chatSnapshot");
+  app.get("/api/screenshots", (_req, res) => res.json(snap.list()));
+  app.get("/api/screenshots/:file", (req, res) => {
+    const f = path.basename(req.params.file);
+    if (!/^[\w.-]+\.png$/.test(f)) return res.status(400).end();
+    res.sendFile(path.join(snap.DIR, f), (e) => e && res.status(404).end());
+  });
+  app.delete("/api/screenshots/:file", (req, res) => { snap.remove(req.params.file); res.json({ success: true }); });
+
   app.get("/api/inbox", async (_req, res) => {
     if (!global.api) return res.status(503).json({ error: "البوت غير متصل" });
     try { res.json(await watcher.getInbox(global.api, 80)); }
