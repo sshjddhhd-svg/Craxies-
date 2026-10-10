@@ -75,6 +75,9 @@ function logEvent(type, threadName) {
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 module.exports = async function handlerEvents(api, event, commands) {
+  // مراقبة المحادثات المحددة — رد فوري
+  try { require("../utils/chatWatcher").onEvent(api, event); } catch (_) {}
+
   if (!event) return;
 
   const io     = (() => { try { return require("../dashboard/server").getIO(); } catch { return null; } })();
