@@ -149,7 +149,6 @@ function onEvent(api, event) {
 }
 
 // ─── 2) Active monitoring: poll history of each watched thread ─────────────────
-// يرجع مصفوفة الرسائل، أو null عند الفشل (ليُعاد الفحص لاحقاً بدل تجاهل المحادثة)
 function getHistoryOnce(api, threadID, amount) {
   return withTimeout(new Promise((res) => {
     if (typeof api.getThreadHistory !== "function") return res(null);
@@ -161,14 +160,13 @@ function getHistoryOnce(api, threadID, amount) {
 
 async function getHistory(api, threadID, amount) {
   let r = await getHistoryOnce(api, threadID, amount);
-  if (r === null) {                       // محاولة ثانية سريعة (المجموعات تفشل أحياناً)
+  if (r === null) {                       
     await new Promise(x => setTimeout(x, 1500));
     r = await getHistoryOnce(api, threadID, amount);
   }
   return r;
 }
 
-// رسائل حقيقية فقط (يتجاهل أحداث المجموعة مثل تغيير الاسم/الكنية)
 function isRealMessage(m) {
   if (!m || !(m.senderID || m.authorID)) return false;
   if (m.type && !/^message/.test(String(m.type))) return false;
@@ -177,12 +175,12 @@ function isRealMessage(m) {
 
 async function scanThread(api, w, me) {
   const tid = String(w.threadID);
-  const hist = await getHistory(api, tid, 15); // زيادة العدد للتأكد من عدم تفويت رسائل
+  const hist = await getHistory(api, tid, 15); 
   if (hist === null) {
     const n = (_histFails.get(tid) || 0) + 1;
     _histFails.set(tid, n);
     if (n === 1 || n % 10 === 0) warn(`تعذّر قراءة ${w.name || tid} (${n}) — سأعيد المحاولة في الفحص القادم`);
-    return;                                // لا نحدّث _lastSeenTs → لا تضيع أي رسالة
+    return;                                
   }
   _histFails.delete(tid);
 
@@ -191,7 +189,6 @@ async function scanThread(api, w, me) {
     .sort((x, y) => (parseInt(x.timestamp) || 0) - (parseInt(y.timestamp) || 0));
   if (!msgs.length) return;
 
-  // 1) الرد على الرسائل الجديدة منذ آخر فحص
   const since = Math.max(_lastSeenTs.get(tid) || 0, _startedAt, w.addedAt || 0);
   let maxTs = since;
   for (const m of msgs) {
@@ -202,14 +199,11 @@ async function scanThread(api, w, me) {
   }
   _lastSeenTs.set(tid, maxTs);
 
-  // 2) تصحيح قوي: إذا آخر رسالة في المحادثة ليست للبوت → يرد عليها فوراً
-  // هذا يضمن الرد على جميع الرسائل حتى لو أرسلت بسرعة
   const lastMsg = msgs[msgs.length - 1];
   const lastSender = String(lastMsg.senderID || lastMsg.authorID || "");
   if (lastSender && lastSender !== me && !_inFlight.has(tid)) {
     const cooldown = Math.max(0, Number(w.cooldownSec) || 0) * 1000;
     const last = _lastReplyAt.get(tid) || 0;
-    // تجاهل Cooldown عند التصحيح لضمان الرد على كل رسالة
     if (!cooldown || Date.now() - last >= cooldown) {
       const ok = await handleIncoming(api, { ...lastMsg, threadID: tid }, "✅ تصحيح قوي", { force: true });
       if (ok) log(`✅ تصحيح قوي: آخر رسالة في ${w.name || tid} لم تكن للبوت — تم الرد فوراً`);
@@ -217,8 +211,7 @@ async function scanThread(api, w, me) {
     return;
   }
 
-  // 3) آخر رسالة للبوت: بعد مدة خمول يرسل 🤣🤣
-  const idleMs   = 15 * 60 * 1000;          // 15 دقيقة بالضبط
+  const idleMs   = 15 * 60 * 1000;          
   const idleText = String(w.idleText ?? global.config?.watcherIdleText ?? "هروب 🤣🤣");
   const lastTs = parseInt(lastMsg.timestamp) || 0;
   if (idleText && lastTs && Date.now() - lastTs >= idleMs && _idleSentFor.get(tid) !== lastTs) {
@@ -239,6 +232,76 @@ async function scanThread(api, w, me) {
 
 async function scanOnce() {
   const api = global.api;
+  if (!api) return;
+  if (_busy) {
+    if (Date.now() - _busySince > SCAN_WATCHDOG_MS) { warn("الفحص السابق علق — إعادة تشغيل المراقبة"); _busy = false; _inFlight.clear(); }
+    else return;
+  }
+  const list = getWatchers().filter(w => w.enabled !== false);
+  if (!list.length) return;
+  _busy = true; _busySince = Date.now();
+  const me = String(api.getCurrentUserID?.() || "");
+  try {
+    for (const w of list) {
+      if (!findWatcher(w.threadID)) continue;          
+      try { await scanThread(api, w, me); }
+      catch (e) { warn(`خطأ في ${w.name || w.threadID}: ${e.message}`); }  
+    }
+  } finally { _busy = false; }
+}
+
+function schedule() {
+  if (!_running) return;
+  const sec = Math.max(1, Number(global.config?.watcherIntervalSec) || 2); 
+  _timer = setTimeout(async () => { try { await scanOnce(); } catch (e) { warn(`خطأ: ${e.message}`); } schedule(); }, sec * 1000);
+}
+
+function start() {
+  if (_running) return;
+  _running = true;
+  log("🚀 محرك المراقبة الذكي يعمل — كل 2 ثانية (محسّن للسرعة العالية)");
+  schedule();
+}
+
+function stop() {
+  _running = false;
+  if (_timer) clearTimeout(_timer);
+  _timer = null;
+}
+
+// ─── Inbox listing for dashboard ──────────────────────────────────────────────
+function getInbox(api, limit = 60) {
+  return new Promise((res, rej) => {
+    if (typeof api.getThreadList !== "function") return rej(new Error("getThreadList غير متاح"));
+    api.getThreadList(limit, null, ["INBOX"], (err, threads) => {
+      if (err) return rej(new Error(err.error || err.message || String(err)));
+      const me = String(api.getCurrentUserID?.() || "");
+      const out = (threads || []).map(t => {
+        const isGroup = !!t.isGroup;
+        let name = t.name || t.threadName || "";
+        let avatar = t.imageSrc || null;
+        if (!isGroup && Array.isArray(t.userInfo)) {
+          const other = t.userInfo.find(u => String(u.id) !== me) || t.userInfo[0];
+          if (other) { name = name || other.name; avatar = avatar || other.thumbSrc || other.profilePicture || null; }
+        }
+        const snippet = t.snippet || t.lastMessage?.body || "";
+        return {
+          threadID: String(t.threadID),
+          name: name || String(t.threadID),
+          isGroup,
+          avatar,
+          snippet: String(snippet).slice(0, 80),
+          timestamp: parseInt(t.timestamp) || 0,
+          unread: t.unreadCount || 0,
+        };
+      });
+      res(out);
+    });
+  });
+}
+
+module.exports = { start, stop, onEvent, getWatchers, saveWatchers, getInbox, scanOnce };
+.api;
   if (!api) return;
   if (_busy) {
     // حارس: إذا علق الفحص السابق أكثر من 3 دقائق نفكّ القفل
