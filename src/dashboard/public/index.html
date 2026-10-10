@@ -593,6 +593,10 @@ input.ck-input:focus{border-color:var(--accent)}
   </div>
   <div class="page-content">
     <div class="panel" style="margin-bottom:14px">
+      <div style="font-weight:700;margin-bottom:8px">📸 لقطات الهروب <span style="font-weight:400;font-size:.72rem;color:var(--muted)">(عند مرور 15 دقيقة على رسالة البوت يرسل "هروب 🤣🤣" ويحفظ لقطة)</span></div>
+      <div id="w-shots" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px"><div class="live-empty">لا توجد لقطات بعد</div></div>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
       <div style="font-weight:700;margin-bottom:8px">📌 المحادثات المراقبة</div>
       <div id="w-list"><div class="live-empty">لا توجد محادثات مراقبة بعد</div></div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:.75rem;color:var(--muted)">
@@ -1691,8 +1695,18 @@ async function sendLiveMsg(){
 /* ══ WATCH (مراقبة المحادثات) ══ */
 let _inbox=[],_wSel=null;
 const _esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function loadShots(){
+  const r=await apiFetch('/api/screenshots');if(!r.ok)return;
+  const l=r.data||[];
+  $('w-shots').innerHTML=l.length?l.map(x=>`<div style="border:1px solid var(--border);border-radius:9px;padding:5px;background:var(--card)">
+    <a href="/api/screenshots/${encodeURIComponent(x.file)}" target="_blank"><img src="/api/screenshots/${encodeURIComponent(x.file)}" style="width:100%;height:150px;object-fit:cover;object-position:top;border-radius:6px"/></a>
+    <div style="font-size:.7rem;margin-top:4px">${_esc(x.name||x.threadID)}</div>
+    <div style="font-size:.65rem;color:var(--muted);display:flex;justify-content:space-between;align-items:center">${new Date(x.at).toLocaleString('ar')}
+    <button class="btn btn-outline btn-sm" style="padding:1px 6px" onclick="delShot('${x.file}')">🗑</button></div></div>`).join(''):'<div class="live-empty">لا توجد لقطات بعد</div>';
+}
+async function delShot(f){if(!confirm('حذف اللقطة؟'))return;await apiFetch('/api/screenshots/'+encodeURIComponent(f),{method:'DELETE'});loadShots();}
 async function loadWatchPage(){
-  loadWatchers();
+  loadWatchers();loadShots();
   $('w-inbox').innerHTML='<div class="live-empty">جارٍ جلب محادثاتك…</div>';
   const r=await apiFetch('/api/inbox');
   if(!r.ok){$('w-inbox').innerHTML=`<div class="live-empty">❌ ${_esc(r.data.error||'تعذر جلب المحادثات')}</div>`;return;}
