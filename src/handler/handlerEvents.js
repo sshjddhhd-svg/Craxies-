@@ -99,9 +99,10 @@ module.exports = async function handlerEvents(api, event, commands) {
     const isAdmin = global.isAdmin ? global.isAdmin(senderID) : isOwner || (config.adminIDs||[]).map(String).includes(String(senderID));
 
     // Resolve names (non-blocking)
+    // في المحادثات الخاصة نستخدم اسم المرسل كاسم للمحادثة حتى تظهر في لوحة التحكم
     const [senderName, threadName] = await Promise.all([
       resolveUser(api, senderID),
-      isGroup ? resolveThread(api, threadID) : Promise.resolve("DM"),
+      isGroup ? resolveThread(api, threadID) : resolveUser(api, senderID),
     ]);
 
     // دراكاريس هو الأمر الوحيد الذي يعمل بدون بادئة، مع بقاء فحص الأدمن
@@ -111,9 +112,10 @@ module.exports = async function handlerEvents(api, event, commands) {
     logMsg(senderName, threadName, body, isGroup, isCmd);
 
     // Update DB (non-blocking)
+    // نسجّل المحادثة دائماً (جماعية أو خاصة) حتى تظهر محادثات الخاص في قسم المراقبة
     Promise.all([
       getOrCreateUser(senderID, senderName).catch(() => {}),
-      isGroup ? getOrCreateThread(threadID, threadName).catch(() => {}) : Promise.resolve(),
+      getOrCreateThread(threadID, threadName).catch(() => {}),
     ]);
 
     const msgData = { senderID, senderName, threadID, threadName, body, isGroup, messageID, timestamp: Date.now() };
