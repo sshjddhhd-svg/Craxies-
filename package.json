@@ -5,8 +5,8 @@
   "type": "commonjs",
   "description": "Facebook Messenger Userbot powered by @dongdev/fca-unofficial",
   "scripts": {
-    "start": "LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libuuid.so.1 node src/index.js",
-    "dev": "LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libuuid.so.1 node src/index.js",
+    "start": "node scripts/prepare-storage.js && node src/index.js",
+    "dev": "node src/index.js",
     "postinstall": "node scripts/patch-fca.js"
   },
   "dependencies": {
@@ -26,5 +26,8 @@
     "sequelize": "^6.37.7",
     "socket.io": "^4.8.1",
     "sqlite3": "^5.1.7"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

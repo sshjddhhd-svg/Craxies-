@@ -146,6 +146,17 @@ input.ck-input:focus{border-color:var(--accent)}
 .prot-card .pc-desc{font-size:.64rem;color:var(--muted);margin-top:2px}
 .toggle-sw{position:relative;width:38px;height:21px;flex-shrink:0}
 .toggle-sw input{display:none}
+.toggle-sw.sm{width:30px;height:17px}
+.toggle-sw.sm .track{border-radius:17px}
+.toggle-sw.sm .thumb{top:2px;right:2px;width:13px;height:13px}
+.toggle-sw.sm input:checked+.track+.thumb,.toggle-sw.sm input:checked~.thumb{transform:translateX(-13px)}
+.w-row{display:flex;align-items:center;gap:10px;padding:6px 10px;border:1px solid var(--border);border-radius:9px;margin-bottom:5px;background:var(--card)}
+.w-row.off{opacity:.55}
+.w-info{flex:1;min-width:0}
+.w-name{font-size:.8rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.w-sub{font-size:.66rem;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.w-del{background:none;border:none;color:var(--muted2);cursor:pointer;font-size:.8rem;padding:4px 6px;border-radius:6px}
+.w-del:hover{color:var(--red);background:var(--border)}
 .toggle-sw .track{position:absolute;inset:0;background:var(--muted);border-radius:21px;transition:background .25s;cursor:pointer}
 .toggle-sw input:checked+.track{background:var(--green)}
 .toggle-sw .thumb{position:absolute;top:3px;right:3px;width:15px;height:15px;border-radius:50%;background:#fff;transition:transform .25s;pointer-events:none}
@@ -592,7 +603,7 @@ input.ck-input:focus{border-color:var(--accent)}
     <div class="panel">
       <div style="font-weight:700;margin-bottom:8px">💬 محادثاتك — اضغط على محادثة لاختيارها</div>
       <input class="live-search" id="w-search" placeholder="🔍 بحث بالاسم…" oninput="renderInbox()"/>
-      <label style="display:flex;gap:6px;align-items:center;font-size:.72rem;color:var(--muted);margin:6px 0"><input type="checkbox" id="w-show-groups" onchange="renderInbox()"/> إظهار المجموعات أيضاً</label>
+      <label style="display:flex;gap:6px;align-items:center;font-size:.72rem;color:var(--muted);margin:6px 0"><input type="checkbox" id="w-show-groups" checked onchange="renderInbox()"/> إظهار المجموعات أيضاً</label>
       <div id="w-inbox" style="max-height:360px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"><div class="live-empty">جارٍ التحميل…</div></div>
       <div id="w-form" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
         <div style="margin-bottom:8px">المحادثة المختارة: <b id="w-sel-name"></b></div>
@@ -1709,12 +1720,13 @@ async function loadWatchers(){
 }
 function renderWatchers(list){
   if(!list.length){$('w-list').innerHTML='<div class="live-empty">لا توجد محادثات مراقبة بعد</div>';return;}
-  $('w-list').innerHTML=list.map(w=>`<div style="display:flex;gap:8px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px">
-    <span>${w.enabled===false?'⏸️':'🟢'}</span>
-    <div style="flex:1;min-width:0"><div style="font-weight:600">${_esc(w.name)}</div><div style="font-size:.7rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">↩️ ${_esc(w.reply)}${w.cooldownSec?` · كل ${w.cooldownSec}ث`:''}</div></div>
-    <button class="btn btn-outline btn-sm" onclick="toggleWatcher('${w.threadID}')">${w.enabled===false?'تشغيل':'إيقاف'}</button>
-    <button class="btn btn-outline btn-sm" onclick="deleteWatcher('${w.threadID}')">🗑️</button>
-  </div>`).join('');
+  $('w-list').innerHTML=list.map(w=>{
+    const on=w.enabled!==false;
+    return `<div class="w-row${on?'':' off'}">
+    <label class="toggle-sw sm" title="${on?'مفعّل — اضغط للإيقاف':'متوقف — اضغط للتفعيل'}"><input type="checkbox" ${on?'checked':''} onchange="toggleWatcher('${w.threadID}',this)"><div class="track"></div><div class="thumb"></div></label>
+    <div class="w-info"><div class="w-name">${_esc(w.name)}</div><div class="w-sub">↩️ ${_esc(w.reply)}${w.cooldownSec?` · كل ${w.cooldownSec}ث`:''}</div></div>
+    <button class="w-del" title="حذف" onclick="deleteWatcher('${w.threadID}')">✕</button>
+  </div>`;}).join('');
 }
 async function saveWatcher(){
   if(!_wSel)return toast('اختر محادثة أولاً','err');
@@ -1723,8 +1735,13 @@ async function saveWatcher(){
   if(r.ok){toast('بدأت المراقبة ✔','ok');renderWatchers(r.data.watchers);$('w-reply').value='';$('w-form').style.display='none';_wSel=null;renderInbox();}
   else toast(r.data.error||'خطأ','err');
 }
-async function toggleWatcher(id){const r=await apiFetch(`/api/watchers/${id}/toggle`,{method:'POST'});if(r.ok)renderWatchers(r.data.watchers);}
-async function deleteWatcher(id){if(!confirm('إيقاف مراقبة هذه المحادثة نهائياً؟'))return;const r=await apiFetch(`/api/watchers/${id}`,{method:'DELETE'});if(r.ok)renderWatchers(r.data.watchers);}
+async function toggleWatcher(id,el){
+  if(el)el.disabled=true;
+  const r=await apiFetch(`/api/watchers/${id}/toggle`,{method:'POST'});
+  if(r.ok){renderWatchers(r.data.watchers);toast('تم','ok');}
+  else{toast(r.data?.error||'تعذر التغيير','err');if(el){el.checked=!el.checked;el.disabled=false;}}
+}
+async function deleteWatcher(id){if(!confirm('حذف هذه المراقبة؟'))return;const r=await apiFetch(`/api/watchers/${id}`,{method:'DELETE'});if(r.ok)renderWatchers(r.data.watchers);}
 async function saveWatchInterval(){const r=await apiFetch('/api/watchers/interval',{method:'POST',body:JSON.stringify({intervalSec:parseInt($('w-interval').value)||4})});if(r.ok)toast('تم الحفظ ✔','ok');}
 
 async function onReady(){
