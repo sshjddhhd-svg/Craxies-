@@ -338,6 +338,7 @@ input.ck-input:focus{border-color:var(--accent)}
     <div class="nav-item" data-page="logs" onclick="goto('logs')"><span class="ni">📋</span> سجل النظام</div>
     <div class="nav-section">الإدارة المباشرة</div>
     <div class="nav-item" data-page="live" onclick="goto('live');loadLivePage()"><span class="ni">📡</span> تفعيل مباشر</div>
+    <div class="nav-item" data-page="watch" onclick="goto('watch')"><span class="ni">👁️</span> مراقبة المحادثات</div>
     <div class="nav-section">الإعدادات</div>
     <div class="nav-item" data-page="admins" onclick="goto('admins')"><span class="ni">👑</span> الأدمنز</div>
     <div class="nav-item" data-page="config" onclick="goto('config')"><span class="ni">🔧</span> الإعدادات</div>
@@ -568,6 +569,36 @@ input.ck-input:focus{border-color:var(--accent)}
       <div style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:.63rem;color:var(--muted2);flex-shrink:0">اضغط أي أمر لتنفيذه في المجموعة المحددة</div>
       <div id="lp-cmd-grid" style="overflow-y:auto;flex:1;padding:7px;display:grid;grid-template-columns:1fr 1fr;gap:5px">
         <div class="live-empty" style="grid-column:span 2">جارٍ التحميل…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ WATCH ══ -->
+<div id="page-watch" class="page hidden">
+  <div class="page-header">
+    <div><div class="page-title"><span>👁️</span> مراقبة المحادثات</div><div class="page-desc">اختر محادثة خاصة — البوت يراقبها باستمرار ويرد فوراً عند وصول أي رسالة، حتى بدون إشعار</div></div>
+    <button class="btn btn-outline btn-sm" onclick="loadWatchPage()">🔄 تحديث</button>
+  </div>
+  <div class="page-content">
+    <div class="panel" style="margin-bottom:14px">
+      <div style="font-weight:700;margin-bottom:8px">📌 المحادثات المراقبة</div>
+      <div id="w-list"><div class="live-empty">لا توجد محادثات مراقبة بعد</div></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:.75rem;color:var(--muted)">
+        فحص كل <input id="w-interval" type="number" min="2" max="60" style="width:70px"/> ثانية
+        <button class="btn btn-outline btn-sm" onclick="saveWatchInterval()">حفظ</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div style="font-weight:700;margin-bottom:8px">💬 محادثاتك — اضغط على محادثة لاختيارها</div>
+      <input class="live-search" id="w-search" placeholder="🔍 بحث بالاسم…" oninput="renderInbox()"/>
+      <label style="display:flex;gap:6px;align-items:center;font-size:.72rem;color:var(--muted);margin:6px 0"><input type="checkbox" id="w-show-groups" onchange="renderInbox()"/> إظهار المجموعات أيضاً</label>
+      <div id="w-inbox" style="max-height:360px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"><div class="live-empty">جارٍ التحميل…</div></div>
+      <div id="w-form" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+        <div style="margin-bottom:8px">المحادثة المختارة: <b id="w-sel-name"></b></div>
+        <div class="form-row"><label>نص الرد التلقائي</label><textarea id="w-reply" rows="3" placeholder="مثال: أهلاً، سأرد عليك قريباً"></textarea></div>
+        <div class="form-row"><label>مهلة بين الردود (ثانية، 0 = رد على كل رسالة)</label><input id="w-cooldown" type="number" min="0" value="0"/></div>
+        <button class="btn btn-primary" onclick="saveWatcher()">👁️ بدء المراقبة</button>
       </div>
     </div>
   </div>
@@ -944,6 +975,7 @@ function initSocket(){
     toast(`✅ الكوكيز محدّثة${msg?' — '+msg:''}`, 'ok');
   });
   _socket.on('log',e=>addSysLog(e));
+  _socket.on('watcher-reply',d=>toast(`👁️ رد تلقائي على ${d.name||d.threadID}`,'ok'));
   // تحديث الأدمنز في الوقت الفعلي من أي جهاز متصل
   _socket.on('admins-updated',d=>{
     // أعد رسم القائمة مباشرةً بدون طلب API جديد
@@ -981,6 +1013,7 @@ function goto(page){
   if(page==='admins')loadAdmins();
   if(page==='config')loadConfig();
   if(page==='logs')loadLogs();
+  if(page==='watch')loadWatchPage();
 }
 
 /* ══ SYSTEM LOGS ══ */
@@ -1610,6 +1643,56 @@ async function sendLiveMsg(){
 }
 
 /* ══ READY ══ */
+/* ══ WATCH (مراقبة المحادثات) ══ */
+let _inbox=[],_wSel=null;
+const _esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function loadWatchPage(){
+  loadWatchers();
+  $('w-inbox').innerHTML='<div class="live-empty">جارٍ جلب محادثاتك…</div>';
+  const r=await apiFetch('/api/inbox');
+  if(!r.ok){$('w-inbox').innerHTML=`<div class="live-empty">❌ ${_esc(r.data.error||'تعذر جلب المحادثات')}</div>`;return;}
+  _inbox=r.data||[];renderInbox();
+}
+function renderInbox(){
+  const q=($('w-search').value||'').trim().toLowerCase();
+  const groups=$('w-show-groups').checked;
+  const items=_inbox.filter(t=>(groups||!t.isGroup)&&(!q||t.name.toLowerCase().includes(q)));
+  if(!items.length){$('w-inbox').innerHTML='<div class="live-empty">لا توجد محادثات</div>';return;}
+  $('w-inbox').innerHTML=items.map(t=>`<div onclick="selectWatchThread('${t.threadID}')" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;cursor:pointer;${_wSel&&_wSel.threadID===t.threadID?'outline:2px solid var(--accent,#3b82f6)':''}">
+    ${t.avatar?`<img src="${_esc(t.avatar)}" style="width:36px;height:36px;border-radius:50%;object-fit:cover" onerror="this.style.display='none'"/>`:`<div style="width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--border)">${t.isGroup?'👥':'👤'}</div>`}
+    <div style="flex:1;min-width:0"><div style="font-weight:600">${_esc(t.name)}</div><div style="font-size:.7rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(t.snippet)}</div></div>
+    ${t.unread?`<span style="font-size:.65rem;padding:2px 6px;border-radius:10px;background:var(--accent,#3b82f6);color:#fff">${t.unread}</span>`:''}
+  </div>`).join('');
+}
+function selectWatchThread(id){
+  _wSel=_inbox.find(t=>t.threadID===id);if(!_wSel)return;
+  $('w-sel-name').textContent=_wSel.name;$('w-form').style.display='block';renderInbox();
+  $('w-reply').focus();
+}
+async function loadWatchers(){
+  const r=await apiFetch('/api/watchers');if(!r.ok)return;
+  $('w-interval').value=r.data.intervalSec||4;renderWatchers(r.data.watchers||[]);
+}
+function renderWatchers(list){
+  if(!list.length){$('w-list').innerHTML='<div class="live-empty">لا توجد محادثات مراقبة بعد</div>';return;}
+  $('w-list').innerHTML=list.map(w=>`<div style="display:flex;gap:8px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px">
+    <span>${w.enabled===false?'⏸️':'🟢'}</span>
+    <div style="flex:1;min-width:0"><div style="font-weight:600">${_esc(w.name)}</div><div style="font-size:.7rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">↩️ ${_esc(w.reply)}${w.cooldownSec?` · كل ${w.cooldownSec}ث`:''}</div></div>
+    <button class="btn btn-outline btn-sm" onclick="toggleWatcher('${w.threadID}')">${w.enabled===false?'تشغيل':'إيقاف'}</button>
+    <button class="btn btn-outline btn-sm" onclick="deleteWatcher('${w.threadID}')">🗑️</button>
+  </div>`).join('');
+}
+async function saveWatcher(){
+  if(!_wSel)return toast('اختر محادثة أولاً','err');
+  const reply=$('w-reply').value.trim();if(!reply)return toast('اكتب نص الرد','err');
+  const r=await apiFetch('/api/watchers',{method:'POST',body:JSON.stringify({threadID:_wSel.threadID,name:_wSel.name,reply,cooldownSec:parseInt($('w-cooldown').value)||0})});
+  if(r.ok){toast('بدأت المراقبة ✔','ok');renderWatchers(r.data.watchers);$('w-reply').value='';$('w-form').style.display='none';_wSel=null;renderInbox();}
+  else toast(r.data.error||'خطأ','err');
+}
+async function toggleWatcher(id){const r=await apiFetch(`/api/watchers/${id}/toggle`,{method:'POST'});if(r.ok)renderWatchers(r.data.watchers);}
+async function deleteWatcher(id){if(!confirm('إيقاف مراقبة هذه المحادثة نهائياً؟'))return;const r=await apiFetch(`/api/watchers/${id}`,{method:'DELETE'});if(r.ok)renderWatchers(r.data.watchers);}
+async function saveWatchInterval(){const r=await apiFetch('/api/watchers/interval',{method:'POST',body:JSON.stringify({intervalSec:parseInt($('w-interval').value)||4})});if(r.ok)toast('تم الحفظ ✔','ok');}
+
 async function onReady(){
   initSocket();await loadStats();loadCookieStatus();
   const cfg=await apiFetch('/api/config');if(cfg.ok)window._prefix=cfg.data.prefix||'/';
