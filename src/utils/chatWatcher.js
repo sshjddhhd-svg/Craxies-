@@ -36,6 +36,12 @@ const MIN_GAP_MS           = 1500;   // أقل فاصل بين ردّين في �
 const RESEND_AFTER_MS      = 15000;  // إن لم يظهر ردّنا في السجل بعد هذه المدة نرسل مرة أخرى
 const MAX_BACKOFF_MS       = 8000; 
 const EVENT_TRUST_MS       = 20000;  // رسالة وصلت بالمستمع ولم تظهر بعد في السجل
+const DELAY_MIN_MS         = 20000;  // أقل وقت انتظار قبل الرد
+const DELAY_MAX_MS         = 30000;  // أقصى وقت انتظار قبل الرد
+function randomDelay() { return DELAY_MIN_MS + Math.floor(Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS + 1)); }
+
+// نص الرد الثابت (يُرسل دائماً بغض النظر عن النص المحفوظ في الإعدادات)
+const FIXED_REPLY = "𝑨𝑼𝑻𝑶 𝑹𝑬𝑷𝑳𝒀\n\n\n\n𝑲𝑰𝑵𝑮 𝑴𝑼𝒁𝑨𝑵 『༴‌卍⋆‌🕷️👑』⇣؍.َِ\n\n\n\n🕷️𝑳𝑶𝑹𝑫 𝐒𝐏𝐈𝐃𝐄𝐑𝐒 ..➪ 𝑴𝑼𝒁𝑨𝑵 𝑲𝑶𝑵🕷️\n\n\n\n♕︎ 𝑻𝑯𝑬 𝑩𝑬𝑺𝑻  ♕︎\n\n\n\n𖢩🅝𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅚𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅗𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅛𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅕𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅡𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅐𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅝𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅚𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅗𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅛𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅕𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅡𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅐𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅝𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅚𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅗𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅛𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅕𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅡𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅐𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅝𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅚𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅗𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅛𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅕𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅡𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅐𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅝𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅚𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅗𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅛𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅕𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅡𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅐𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅝𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅚𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅗𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅛𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅕𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅘𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅡𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸𖢩🅐𖢩👑𖢩𒁢𖢩🕷️𖢩𒁢𖢩🩸\n\n\n\n〘🥊─卍─🥊〙\n\n\n\n\n\n𝐒𝐏𝐈𝐃𝐄𝐑𝐒 𝑻𝑯𝑬 𝑺𝑻𝑹𝑶𝑵𝑮𝑬𝑺𝑻 𝑶𝑭 𝑨𝑳𝑳 𝑻𝑰𝑴𝑬  『༴‌卍⋆‌🕷️』⇣؍.َِ\n\n\n\n𝑲𝑰𝑵𝑮 𝑴𝑼𝒁𝑨𝑵┊ 🕷️👑』⇣┊";
 
 const log  = (m) => { try { (global.log?.info || console.log)(`👁️ [مراقبة] ${m}`); } catch (_) {} };
 const warn = (m) => { try { (global.log?.warn || console.warn)(`👁️ [مراقبة] ${m}`); } catch (_) {} };
@@ -57,7 +63,7 @@ function S(tid) {
   let s = _state.get(tid);
   if (!s) {
     s = { last: null, evt: null, repliedTo: null, repliedAt: 0, busy: false, busySince: 0,
-          again: false, fails: 0, nextTryAt: 0, kickTimer: null };
+          again: false, fails: 0, nextTryAt: 0, kickTimer: null, dueAt: 0 };
     _state.set(tid, s);
   }
   return s;
@@ -159,7 +165,7 @@ function rawSend(a, tid, text, replyTo) {
 }
 
 async function sendReply(a, w, replyTo) {
-  const text = String(w.reply || "").trim();
+  const text = FIXED_REPLY;
   if (!text) return null;
   let r = await rawSend(a, w.threadID, text, replyTo);
   if (!r.ok && replyTo) r = await rawSend(a, w.threadID, text, null); // ربما حُذفت الرسالة
@@ -221,7 +227,7 @@ async function checkThread(tid) {
     s.last = last;
 
     // 2) آخر رسالة للبوت → لا شيء
-    if (last.mine) { s.fails = 0; return; }
+    if (last.mine) { s.fails = 0; s.dueAt = 0; return; }
 
     // 3) آخر رسالة لشخص آخر → أرسل
     const now = Date.now();
@@ -232,9 +238,17 @@ async function checkThread(tid) {
     const readyAt = Math.max(s.nextTryAt, s.repliedAt + Math.max(cooldown, MIN_GAP_MS));
     if (now < readyAt) { retryIn = readyAt - now + 50; return; }
 
+    // مؤقت عشوائي 20-30 ثانية: يبدأ عند أول رسالة ليست للبوت ولا يُعاد ضبطه
+    // مهما أُرسلت رسائل أخرى. عند انتهائه نتحقق من جديد (أعلاه) ثم نرسل رسالة واحدة.
+    if (!s.dueAt) {
+      s.dueAt = now + randomDelay();
+      log(`⏳ سيُرسل الرد في ${w.name || tid} بعد ${Math.round((s.dueAt - now) / 1000)} ث`);
+    }
+    if (now < s.dueAt) { retryIn = s.dueAt - now + 50; return; }
+
     const sent = await sendReply(a, w, last.mid || undefined);
     if (sent) {
-      s.fails = 0; s.nextTryAt = 0;
+      s.fails = 0; s.nextTryAt = 0; s.dueAt = 0;
       s.repliedTo = last.mid; s.repliedAt = Date.now();
       s.last = { mid: sent.mid || `sent-${Date.now()}`, sender: me, mine: true };
       if (s.evt && s.evt.mid === last.mid) s.evt = null;
@@ -259,6 +273,117 @@ function onEvent(_api, event) {
   try {
     if (!_running || !event) return;
     if (event.type !== "message" && event.type !== "message_reply") return;
+    const tid = String(event.threadID || "");
+    if (!tid || !findWatcher(tid)) return;
+    const a = api() || _api;
+    const sender = senderOf(event);
+    if (!sender) return;
+    const s = S(tid);
+    if (sender === myID(a)) {
+      s.last = { mid: String(event.messageID || ""), sender, mine: true };
+      return;
+    }
+    const mid = String(event.messageID || `evt-${Date.now()}`);
+    s.evt = { mid, at: Date.now() };
+    s.last = { mid, sender, mine: false };
+    kick(tid, 250); // تأخير بسيط لدمج الرسائل المتتالية السريعة في رد واحد
+  } catch (e) { warn(`خطأ في المستمع: ${e.message}`); }
+}
+
+/* ───────────── الحلقة الدورية (كل 4 ثوانٍ) ───────────── */
+
+async function scanOnce() {
+  if (!api()) return;
+  for (const w of getWatchers()) {
+    if (w.enabled === false) continue;
+    kick(w.threadID, 0);
+  }
+}
+
+function loop() {
+  if (!_running) return;
+  if (_timer) clearTimeout(_timer);
+  _timer = setTimeout(() => {
+    _lastTick = Date.now();
+    try { scanOnce(); } catch (e) { warn(`خطأ: ${e.message}`); }
+    loop();
+  }, intervalMs());
+}
+
+function watchdog() {
+  if (!_running) return;
+  if (Date.now() - _lastTick > intervalMs() * 3 + 5000) {
+    warn("الحلقة الدورية متوقفة — إعادة تشغيل");
+    _lastTick = Date.now();
+    loop();
+    scanOnce();
+  }
+  for (const [tid, s] of _state) {
+    if (s.busy && Date.now() - s.busySince > BUSY_STUCK_MS) {
+      warn(`الغروب ${tid} عالق — تم تحريره`);
+      s.busy = false;
+      kick(tid, 0);
+    }
+  }
+}
+
+function start() {
+  if (_running) return;
+  _running = true;
+  _lastTick = Date.now();
+  log(`🚀 المراقبة تعمل — فحص كل ${intervalMs() / 1000} ثوانٍ، البوت سيبقى صاحب آخر رسالة`);
+  loop();
+  _watchdog = setInterval(() => { try { watchdog(); } catch (e) { warn(e.message); } }, 5000);
+  scanOnce();
+}
+
+function stop() {
+  _running = false;
+  if (_timer) clearTimeout(_timer);
+  if (_watchdog) clearInterval(_watchdog);
+  _timer = null; _watchdog = null;
+  for (const s of _state.values()) if (s.kickTimer) { clearTimeout(s.kickTimer); s.kickTimer = null; }
+}
+
+// لا تدع خطأ غير معالج يُسقط البوت أو المراقبة
+if (!global.__chatWatcherGuards) {
+  global.__chatWatcherGuards = true;
+  process.on("unhandledRejection", (e) => warn(`رفض غير معالج: ${e?.message || e?.error || e}`));
+}
+
+/* ───────────── قائمة المحادثات للوحة التحكم ───────────── */
+
+function getInbox(a, limit = 60) {
+  return new Promise((res, rej) => {
+    if (typeof a.getThreadList !== "function") return rej(new Error("getThreadList غير متاح"));
+    const p = a.getThreadList(limit, null, ["INBOX"], (err, threads) => {
+      if (err) return rej(new Error(err.message || err.error || String(err)));
+      const me = myID(a);
+      const out = (threads || []).map(t => {
+        const isGroup = !!t.isGroup;
+        let name = t.name || t.threadName || "";
+        let avatar = t.imageSrc || null;
+        if (!isGroup && Array.isArray(t.userInfo)) {
+          const other = t.userInfo.find(u => String(u.id) !== me) || t.userInfo[0];
+          if (other) { name = name || other.name; avatar = avatar || other.thumbSrc || other.profilePicture || null; }
+        }
+        return {
+          threadID: String(t.threadID),
+          name: name || String(t.threadID),
+          isGroup,
+          avatar,
+          snippet: String(t.snippet || "").slice(0, 80),
+          timestamp: parseInt(t.timestamp) || 0,
+          unread: t.unreadCount || 0,
+        };
+      });
+      res(out);
+    });
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  });
+}
+
+module.exports = { start, stop, onEvent, getWatchers, saveWatchers, getInbox, scanOnce }; !== "message_reply") return;
     const tid = String(event.threadID || "");
     if (!tid || !findWatcher(tid)) return;
     const a = api() || _api;
